@@ -14,7 +14,9 @@ Artifact rules:
 - Write an answer-first Markdown narrative and place each widget with a dashboard fence containing exactly {"widgetId":"..."}.
 - Define at most eight datasets and eight widgets.
 - Keep SQL explicit, analytical, and attributable. Never assume a product catalog, geography, currency, identifier, or time grain unless the source context establishes it.
+- Round every measure to its display precision in SQL. An unrounded AVG or raw division reaches the chart with full floating-point precision and reads as noise: two decimals for money, one for durations and distances, two for percentages, none for counts.
 - ECharts option objects must be JSON-only and must not contain functions, data/source arrays, prototype keys, or external URLs. The host injects dataset.source, palette, typography, and responsiveness. Because datasets use object rows, omit label.formatter where possible; a literal {c} formatter otherwise resolves to the whole row object rather than the encoded metric.
+- Label the measure axis with its metric and unit. Do not name a category axis whose own labels already say what they are; at nameLocation middle that name is drawn rotated across the axis where it fights the labels. Keep encode.tooltip to at most four columns with the hovered category first, since every listed column becomes a tooltip row.
 - D3 scripts receive only data, container, width, height, theme, tooltip, emit, onResize, and d3. They may not access document/window/parent, network, storage, dynamic imports, eval, Function, or external resources.
 - Give every chart meaningful alt text and a plain-language description.
 - Never reveal hidden reasoning. Tool-facing status should be concise and factual.`

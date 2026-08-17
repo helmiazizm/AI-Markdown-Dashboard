@@ -1,5 +1,5 @@
 import type { DashboardArtifactV1, GenerationDetailLevel } from '@fieldboard/contracts'
-import { getConfig } from '../config.js'
+import { getConfig, type AppConfig } from '../config.js'
 import {
   addGenerationEvent,
   createGenerationRun,
@@ -11,6 +11,14 @@ import { artifactSha256, canonicalizeDashboardArtifact } from '../content/codec.
 import { prepareGenerationPublication } from '../content/persistence.js'
 import { assertRepositoryReadyForGeneration, publishPreparedRevision } from '../content/publication-service.js'
 import { getAgentAdapter } from './runner.js'
+
+/**
+ * Provenance records which model produced a revision, so every LLM-backed mode must report its
+ * real model id. Only the demo adapter is deterministic.
+ */
+export function recordedModel(config: AppConfig): string {
+  return config.AGENT_MODE === 'demo' ? 'deterministic-demo' : config.OPENROUTER_MODEL
+}
 
 export async function queueGeneration(input: {
   prompt: string
@@ -38,7 +46,8 @@ export async function queueGeneration(input: {
     mode: input.dashboardId ? 'refine' : 'create',
     prompt: input.prompt,
     detailLevel: input.detailLevel ?? 'standard',
-    model: config.AGENT_MODE === 'cline' ? config.OPENROUTER_MODEL : 'deterministic-demo',
+    model: recordedModel(config),
+    pipeline: config.AGENT_MODE,
     dashboardId: input.dashboardId,
     baseRevisionId: input.baseRevisionId,
   })
@@ -73,7 +82,7 @@ async function runGeneration(input: {
       artifact,
       artifactHash: artifactSha256(artifact),
       results: result.results,
-      model: config.AGENT_MODE === 'cline' ? config.OPENROUTER_MODEL : 'deterministic-demo',
+      model: recordedModel(config),
       usage: result.usage,
       dashboardId: input.dashboardId,
       baseRevisionId: input.baseRevisionId,

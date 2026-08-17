@@ -18,6 +18,7 @@ export async function createGenerationRun(input: {
   prompt: string
   detailLevel: GenerationDetailLevel
   model: string
+  pipeline: string
   dashboardId?: string
   baseRevisionId?: string
 }): Promise<string> {
@@ -26,8 +27,8 @@ export async function createGenerationRun(input: {
     INSERT INTO generation_runs(id, dashboard_id, base_revision_id, mode, prompt, detail_level, status, model)
     VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7)
   `, [id, input.dashboardId ?? null, input.baseRevisionId ?? null, input.mode, input.prompt, input.detailLevel, input.model])
-  await addGenerationEvent(id, 'queued', 'Prompt received. Waiting for the analysis agent.', input.detailLevel === 'detailed'
-    ? { kind: 'run_config', detailLevel: input.detailLevel }
+  await addGenerationEvent(id, 'queued', 'Prompt received. Assembling the analysis crew.', input.detailLevel === 'detailed'
+    ? { kind: 'run_config', detailLevel: input.detailLevel, pipeline: input.pipeline, model: input.model }
     : undefined)
   return id
 }

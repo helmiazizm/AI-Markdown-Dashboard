@@ -1,3 +1,4 @@
+import { generationEventTypes, isTerminalGenerationEvent } from '@fieldboard/contracts'
 import type {
   DashboardDetail,
   DashboardListItem,
@@ -48,12 +49,13 @@ export function followGeneration(
   onError: (error: Error) => void,
 ): () => void {
   const source = new EventSource(`/api/generations/${id}/events`)
-  const types: GenerationEvent['type'][] = ['queued', 'inspecting', 'querying', 'composing', 'validating', 'publishing', 'publication_blocked', 'completed', 'failed']
-  for (const type of types) {
+  // Iterate the contract's stage list so a newly added stage can never be emitted by the server
+  // and silently ignored here.
+  for (const type of generationEventTypes) {
     source.addEventListener(type, (raw) => {
       const event = JSON.parse((raw as MessageEvent).data) as GenerationEvent
       onEvent(event)
-      if (type === 'completed' || type === 'failed' || type === 'publication_blocked') {
+      if (isTerminalGenerationEvent(type)) {
         source.close()
         void api.generation(id).then(onTerminal).catch(onError)
       }

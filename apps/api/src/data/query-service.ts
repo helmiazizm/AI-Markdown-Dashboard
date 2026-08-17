@@ -48,15 +48,28 @@ export async function getActiveSnapshot(): Promise<ActiveSnapshot | null> {
   } : null
 }
 
+/**
+ * Every warehouse query spawns a worker thread that creates its own DuckDB instance with a
+ * multi-gigabyte memory_limit, so overlapping queries can exhaust a small container. This gate
+ * serialises them process-wide: concurrent callers queue instead of multiplying memory budgets.
+ */
+let queryGate: Promise<unknown> = Promise.resolve()
+
+function withQueryGate<T>(operation: () => Promise<T>): Promise<T> {
+  const result = queryGate.then(operation, operation)
+  queryGate = result.catch(() => undefined)
+  return result
+}
+
 export async function executeDatasetQuery(dataset: DatasetSpec): Promise<QueryExecutionResult> {
   const snapshot = await getActiveSnapshot()
   if (!snapshot) throw new Error('The governed source snapshot is not ready')
   const config = getConfig()
-  const result = await queryWarehouse(
+  const result = await withQueryGate(() => queryWarehouse(
     dataset.sql,
     Math.min(dataset.maxRows, config.QUERY_MAX_ROWS),
     config.QUERY_MAX_BYTES,
-  )
+  ))
   const missing = dataset.expectedColumns.filter((column) => !result.columns.includes(column))
   if (missing.length) throw new Error(`Dataset ${dataset.id} is missing expected columns: ${missing.join(', ')}`)
   return { ...result, snapshot }

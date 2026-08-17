@@ -68,7 +68,7 @@ function formatDate(value: string): string {
       <div class="hero-copy">
         <p class="eyebrow signal-text">Agentic dashboard studio</p>
         <h1>Ask your data.<br /><em>Keep the evidence.</em></h1>
-        <p class="hero-deck">Turn a plain-language business question into a durable analytical fieldbook—queried through governed DuckDB catalogs, rendered as prose and charts, and saved with its provenance intact.</p>
+        <p class="hero-deck">Turn a plain-language business question into a durable analytical fieldbook—planned, analysed, and designed by a crew working in parallel over governed DuckDB catalogs, reviewed before it ships, and saved with its provenance intact.</p>
       </div>
       <div class="snapshot-stamp" :class="{ 'is-ready': health?.status === 'ok' }">
         <span>{{ health?.status === 'ok' ? 'DATA READY' : 'CHECKING DATA' }}</span>
@@ -107,7 +107,7 @@ function formatDate(value: string): string {
           <input v-model="detailedTrail" type="checkbox" :disabled="generating" />
           <span>
             <strong>Show detailed analysis trail</strong>
-            <small>Questions, DuckDB SQL, result shape, and validation checks—not private reasoning.</small>
+            <small>Each role's questions, DuckDB SQL, result shape, and validation checks—not private reasoning.</small>
           </span>
         </label>
         <div class="composer-actions">
@@ -120,9 +120,9 @@ function formatDate(value: string): string {
         <AnalysisTrail v-if="events.length" :events="events" :active="generating" :detailed="detailedTrail" />
       </div>
       <aside class="composer-note">
-        <span class="eyebrow">Bounded agent</span>
-        <p>Source context<br />Read-only query<br />Artifact submission</p>
-        <small>No shell, filesystem, or web tools.</small>
+        <span class="eyebrow">Bounded crew</span>
+        <p>Planner<br />Analyst ∥ Designer<br />Senior review</p>
+        <small>The analyst and designer work in parallel against one column contract. No shell, filesystem, or web tools.</small>
       </aside>
     </section>
 

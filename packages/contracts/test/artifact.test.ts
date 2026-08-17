@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { extractWidgetReferences, validateDashboardArtifact } from '../src/index.js'
+import { extractWidgetReferences, scanWidgetPlacements, validateDashboardArtifact } from '../src/index.js'
 
 const base = {
   version: 1 as const,
@@ -29,6 +29,32 @@ describe('dashboard artifact contract', () => {
   it('accepts a complete referenced artifact', () => {
     expect(validateDashboardArtifact(base).title).toBe('Segment pulse')
     expect(extractWidgetReferences(base.markdown)).toEqual(['by-segment'])
+  })
+
+  it('accepts an explicit half span and defaults to full', () => {
+    const spanned = structuredClone(base)
+    spanned.markdown = '# Segment pulse\n\n```dashboard\n{"widgetId":"by-segment","span":"half"}\n```'
+    expect(validateDashboardArtifact(spanned).title).toBe('Segment pulse')
+    expect(scanWidgetPlacements(spanned.markdown).placements).toEqual([{ widgetId: 'by-segment', span: 'half' }])
+    expect(scanWidgetPlacements(base.markdown).placements).toEqual([{ widgetId: 'by-segment', span: 'full' }])
+  })
+
+  it('rejects an unknown fence key rather than silently ignoring it', () => {
+    const typo = structuredClone(base)
+    typo.markdown = '# Segment pulse\n\n```dashboard\n{"widgetId":"by-segment","spann":"half"}\n```'
+    expect(() => validateDashboardArtifact(typo)).toThrow(/fence 1 is invalid/)
+  })
+
+  it('rejects an invalid span value', () => {
+    const bad = structuredClone(base)
+    bad.markdown = '# Segment pulse\n\n```dashboard\n{"widgetId":"by-segment","span":"halve"}\n```'
+    expect(() => validateDashboardArtifact(bad)).toThrow(/fence 1 is invalid/)
+  })
+
+  it('rejects a widget placed by two fences', () => {
+    const twice = structuredClone(base)
+    twice.markdown = '# Segment pulse\n\n```dashboard\n{"widgetId":"by-segment"}\n```\n\n```dashboard\n{"widgetId":"by-segment"}\n```'
+    expect(() => validateDashboardArtifact(twice)).toThrow(/more than one dashboard fence/)
   })
 
   it('rejects embedded data and external URLs', () => {

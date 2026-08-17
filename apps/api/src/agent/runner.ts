@@ -13,6 +13,8 @@ import { getConfig } from '../config.js'
 import { getGovernedSourceContext } from '../data/source-context.js'
 import { executeDatasetQuery, type QueryExecutionResult } from '../data/query-service.js'
 import { listWarehouseRelations } from '../data/warehouse-relations.js'
+import { createClineRoleRunner } from './crew/cline-role-runner.js'
+import { runCrewPipeline, type CrewPipelineOptions } from './crew/orchestrator.js'
 import { createDemoArtifact } from './demo.js'
 import { buildRunPrompt, dashboardAgentSystemPrompt } from './prompts.js'
 
@@ -253,6 +255,28 @@ class ClineAgentAdapter implements DashboardAgentAdapter {
   }
 }
 
+/**
+ * Runs the four-role crew (planner, then analysis and layout in parallel, then reviewer) behind
+ * the same adapter contract, so runGeneration and the publication path are untouched.
+ */
+export class CrewAgentAdapter implements DashboardAgentAdapter {
+  constructor(private readonly options?: CrewPipelineOptions) {}
+
+  async generate(input: AgentRunInput): Promise<AgentDashboardResult> {
+    const config = getConfig()
+    const options = this.options ?? { runRole: createClineRoleRunner() }
+    if (!this.options && !config.OPENROUTER_API_KEY) {
+      throw new Error('OPENROUTER_API_KEY is required when AGENT_MODE=crew')
+    }
+    const { artifact, usage } = await runCrewPipeline(input, options)
+    const results = await executeFinalQueries(artifact, input)
+    return { artifact, results, usage }
+  }
+}
+
 export function getAgentAdapter(): DashboardAgentAdapter {
-  return getConfig().AGENT_MODE === 'cline' ? new ClineAgentAdapter() : new DemoAgentAdapter()
+  const mode = getConfig().AGENT_MODE
+  if (mode === 'crew') return new CrewAgentAdapter()
+  if (mode === 'cline') return new ClineAgentAdapter()
+  return new DemoAgentAdapter()
 }

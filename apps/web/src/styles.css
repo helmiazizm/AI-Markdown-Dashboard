@@ -104,6 +104,16 @@ textarea:focus { outline: 0; border-color: var(--signal); }
 .repository-strip[data-state="unavailable"] .repository-strip-mark, .repository-strip[data-state="blocked"] .repository-strip-mark, .repository-strip[data-state="diverged"] .repository-strip-mark { background: var(--danger); }
 
 .analysis-trail { position: relative; display: grid; gap: 0; margin-top: 34px; border-top: 1px solid var(--rule); }
+.trail-phase { display: grid; gap: 0; }
+.trail-phase-label { display: flex; align-items: center; gap: 10px; margin: 22px 0 0; padding-left: 38px; color: var(--signal); font: 600 9px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+.trail-phase-label::after { content: ''; flex: 1; height: 1px; background: var(--rule); }
+.trail-phase:first-child > .trail-phase-label { margin-top: 14px; }
+/* The two parallel roles share one lane, distinguished by the role chip on each step. */
+.trail-phase.is-parallel { border-left: 1px solid var(--rule); margin-left: 6px; padding-left: 0; }
+.trail-phase.is-parallel > .trail-phase-label { padding-left: 32px; }
+.trail-phase.is-parallel .trail-step { grid-template-columns: 32px 1fr; }
+.trail-phase.is-parallel .trail-step::before { left: 0; }
+.trail-role { margin-right: 8px; padding: 2px 6px; border: 1px solid var(--signal-dim); color: var(--signal); letter-spacing: .1em; }
 .trail-step { position: relative; display: grid; grid-template-columns: 38px 1fr; min-height: 70px; padding-top: 17px; }
 .trail-step::before { content: ''; position: absolute; top: 0; bottom: 0; left: 6px; width: 1px; background: var(--signal-dim); }
 .trail-node { position: relative; z-index: 1; width: 13px; height: 13px; border: 2px solid var(--signal); background: var(--panel); }
@@ -181,11 +191,34 @@ textarea:focus { outline: 0; border-color: var(--signal); }
 .markdown-prose h2 { margin: 90px 0 18px; padding-top: 22px; border-top: 1px solid var(--rule-light); font-size: clamp(31px, 4vw, 50px); font-weight: 500; letter-spacing: -.05em; }
 .markdown-prose h3 { margin: 60px 0 16px; font-size: 23px; font-weight: 500; }
 .markdown-prose p, .markdown-prose li { color: #b7b0a2; font-size: 17px; line-height: 1.75; }
-.markdown-prose ul { padding-left: 22px; }
+.markdown-prose ul, .markdown-prose ol { padding-left: 22px; }
 .markdown-prose li::marker { color: var(--signal); }
+.markdown-prose li + li { margin-top: 6px; }
 .markdown-prose code { color: var(--signal); font-family: var(--mono); }
+.markdown-prose h4 { margin: 40px 0 12px; color: var(--paper); font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+.markdown-prose strong { color: var(--paper); font-weight: 600; }
+.markdown-prose em { color: #c6beae; }
+.markdown-prose a { color: var(--signal); text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; }
+.markdown-prose a:hover { text-decoration-thickness: 2px; }
+.markdown-prose hr { margin: 48px 0; border: 0; border-top: 1px solid var(--rule-light); }
+.markdown-prose blockquote { margin: 32px 0; padding: 20px 24px; border-left: 2px solid var(--signal); background: var(--panel-raised); }
+.markdown-prose blockquote > :first-child { margin-top: 0; }
+.markdown-prose blockquote > :last-child { margin-bottom: 0; }
+.markdown-prose blockquote p { color: #d9d1c2; font-size: 19px; line-height: 1.6; letter-spacing: -.015em; }
+.markdown-prose pre { overflow-x: auto; margin: 28px 0; padding: 18px; border: 1px solid var(--rule); background: var(--ink); }
+.markdown-prose pre code { display: block; color: #d9d1c2; font: 400 12px/1.65 var(--mono); }
+.markdown-prose table { display: block; width: max-content; max-width: 100%; overflow-x: auto; margin: 30px 0; border-collapse: collapse; }
+.markdown-prose th, .markdown-prose td { padding: 10px 14px; border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
+.markdown-prose th:last-child, .markdown-prose td:last-child { border-right: 0; }
+.markdown-prose thead th { border-bottom-color: var(--rule-light); color: var(--muted); background: var(--panel-raised); font: 600 10px/1.3 var(--mono); letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
+.markdown-prose tbody td { color: #b7b0a2; font-size: 15px; line-height: 1.55; font-variant-numeric: tabular-nums; }
+.markdown-prose tbody tr:last-child td { border-bottom: 0; }
 
 .widget-frame { margin: 45px 0 78px; border: 1px solid var(--rule-light); background: rgba(21,20,15,.82); }
+.widget-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 24px; margin: 45px 0 78px; }
+.widget-row > .widget-frame { margin: 0; min-width: 0; }
+.widget-row .widget-heading { gap: 16px; padding: 20px 22px 18px; }
+.widget-row .widget-visual { padding: 14px; }
 .widget-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 32px; align-items: start; padding: 24px 28px 21px; border-bottom: 1px solid var(--rule); }
 .widget-heading h3 { margin: 7px 0 5px; font-size: clamp(20px, 2.2vw, 30px); font-weight: 500; letter-spacing: -.035em; }
 .widget-heading p { max-width: 680px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
@@ -197,7 +230,7 @@ textarea:focus { outline: 0; border-color: var(--signal); }
 .widget-missing span { color: var(--signal); font-size: 10px; letter-spacing: .12em; }
 .widget-missing p { font-size: 12px; }
 .evidence-drawer { border-top: 1px solid var(--rule-light); background: #100f0c; }
-.evidence-meta { display: grid; grid-template-columns: 2fr repeat(4, 1fr); }
+.evidence-meta { display: grid; grid-template-columns: 2fr repeat(5, 1fr); }
 .evidence-meta > div { min-width: 0; padding: 18px; border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
 .evidence-meta > div:last-child { border-right: 0; }
 .evidence-meta span, .sql-block > div > span { display: block; margin-bottom: 8px; color: var(--muted); font: 600 9px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; }
@@ -297,6 +330,7 @@ textarea:focus { outline: 0; border-color: var(--signal); }
   .toolbar-actions { grid-column: 1 / 3; justify-content: space-between; }
   .document-intro { grid-template-columns: 1fr; gap: 22px; }
   .document-kicker { flex-direction: row; }
+  .widget-row { grid-template-columns: 1fr; gap: 45px; }
   .evidence-meta { grid-template-columns: repeat(2, 1fr); }
   .refinement-panel { grid-template-columns: 1fr; gap: 25px; }
   .historical-banner { grid-template-columns: 1fr; gap: 12px; }

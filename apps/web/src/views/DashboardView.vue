@@ -169,7 +169,7 @@ function formatDate(value: string): string {
             <input v-model="detailedTrail" type="checkbox" :disabled="working" />
             <span>
               <strong>Show detailed analysis trail</strong>
-              <small>Questions, DuckDB SQL, result shape, and validation checks—not private reasoning.</small>
+              <small>Each role's questions, DuckDB SQL, result shape, and validation checks—not private reasoning.</small>
             </span>
           </label>
           <div class="composer-actions"><span>Creates immutable revision {{ detail.revision.revisionNumber + 1 }}</span><button class="signal-button" :disabled="working || prompt.trim().length < 5" @click="refine">Refine fieldboard ↗</button></div>

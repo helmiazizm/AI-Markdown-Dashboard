@@ -1,3 +1,37 @@
+<script setup lang="ts">
+import type { HealthResponse } from '@fieldboard/contracts'
+import { computed, onMounted, ref } from 'vue'
+import { api } from './lib/api.js'
+
+const health = ref<HealthResponse | null>(null)
+
+// The footer used to name a single hardcoded adapter, which went stale the moment a second
+// pipeline existed. Report whatever the API is actually configured to run.
+const PIPELINE_LABELS: Record<string, string> = {
+  crew: 'Crew ↗ OpenRouter',
+  cline: 'Single agent ↗ OpenRouter',
+  demo: 'Deterministic demo',
+}
+
+const pipelineLabel = computed(() => {
+  const mode = health.value?.agentMode
+  return mode ? PIPELINE_LABELS[mode] ?? mode : 'Agent ↗ OpenRouter'
+})
+
+const snapshotLabel = computed(() => {
+  const date = health.value?.activeSnapshot?.snapshotDate
+  return date ? `Snapshot ${date}` : 'Snapshot —'
+})
+
+onMounted(async () => {
+  try {
+    health.value = await api.health()
+  } catch {
+    // The footer is decorative; a failed probe leaves the neutral fallbacks in place.
+  }
+})
+</script>
+
 <template>
   <div class="app-shell">
     <header class="site-header">
@@ -12,7 +46,7 @@
     </header>
     <main><RouterView /></main>
     <footer class="site-footer">
-      <span>DuckDB ↗ MinIO</span><span>Cline ↗ OpenRouter</span><span>Snapshot 2026.03.19</span>
+      <span>DuckDB ↗ MinIO</span><span>{{ pipelineLabel }}</span><span>{{ snapshotLabel }}</span>
     </footer>
   </div>
 </template>

@@ -2,7 +2,7 @@
 import type { EChartsWidgetSpec, QueryResultSnapshot } from '@fieldboard/contracts'
 import type { ECharts, EChartsOption } from 'echarts'
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { prepareEChartsOption } from '../lib/echarts.js'
+import { HOST_PALETTE, HOST_TEXT_STYLE, prepareEChartsOption, withSanctionedPalette } from '../lib/echarts.js'
 
 const props = defineProps<{ widget: EChartsWidgetSpec; result: QueryResultSnapshot }>()
 const root = ref<HTMLDivElement>()
@@ -14,16 +14,18 @@ async function render(): Promise<void> {
   if (!root.value) return
   echarts ??= await import('echarts')
   chart ??= echarts.init(root.value, undefined, { renderer: 'canvas' })
-  const hostOption: EChartsOption = {
-    backgroundColor: 'transparent',
-    color: ['#f5a300', '#f3eee3', '#8f6c2c', '#777166', '#cfc5b1'],
-    textStyle: { color: '#969083', fontFamily: 'Sometype Mono, monospace' },
-    dataset: { dimensions: props.result.columns, source: props.result.rows },
-    aria: { enabled: true, description: props.widget.accessibilityText },
+  // Presentation keys are host defaults the author may override; dataset, aria, and the
+  // transparent background stay host-owned so rows and alt text can only come from us.
+  chart.setOption({
+    color: HOST_PALETTE,
+    textStyle: HOST_TEXT_STYLE,
     animationDuration: 500,
     animationEasing: 'cubicOut',
-  }
-  chart.setOption({ ...prepareEChartsOption(props.widget.option), ...hostOption } as EChartsOption, { notMerge: true })
+    ...withSanctionedPalette(prepareEChartsOption(props.widget.option)),
+    backgroundColor: 'transparent',
+    dataset: { dimensions: props.result.columns, source: props.result.rows },
+    aria: { enabled: true, description: props.widget.accessibilityText },
+  } as EChartsOption, { notMerge: true })
 }
 
 onMounted(async () => {

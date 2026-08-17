@@ -10,10 +10,11 @@ Write JSON-only native ECharts options. Fieldboard injects `dataset.source` from
 
 - Use `series[].encode` with SQL output column names.
 - Omit `data`, `source`, functions, executable formatters, prototype keys, and external URLs.
-- Keep axes labeled with the metric and unit.
+- Label the measure axis with its metric and unit. Do not `name` a category axis whose own labels already say what they are — at `nameLocation: middle` that name is drawn rotated across the axis, where it collides with the labels.
+- Round every measure to its display precision in SQL. An unrounded `AVG` reaches the tooltip with full floating-point precision.
 - Prefer horizontal bars for long category labels and sorted rankings.
 - Avoid pies for close comparisons or many categories.
-- Use tooltips only for columns that help interpretation.
+- Keep `encode.tooltip` to at most four columns, with the hovered category first. Every listed column becomes a tooltip row.
 - Avoid literal `{c}` label formatters for object-row datasets unless the encoded numeric dimension is unambiguous.
 
 Example:

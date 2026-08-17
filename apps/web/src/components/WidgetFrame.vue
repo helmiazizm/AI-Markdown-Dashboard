@@ -17,7 +17,6 @@ function formatTime(value: string): string {
   <figure class="widget-frame">
     <figcaption class="widget-heading">
       <div>
-        <span class="eyebrow">{{ widget.engine }} / {{ dataset.id }}</span>
         <h3>{{ widget.title }}</h3>
         <p>{{ widget.description }}</p>
       </div>
@@ -35,6 +34,7 @@ function formatTime(value: string): string {
     <div v-if="inspecting" class="evidence-drawer">
       <div class="evidence-meta">
         <div><span>Question</span><strong>{{ dataset.question }}</strong></div>
+        <div><span>Dataset</span><strong>{{ dataset.id }}</strong></div>
         <div><span>Renderer</span><strong>{{ widget.engine.toUpperCase() }}</strong></div>
         <div><span>Rows</span><strong>{{ result?.rowCount ?? 0 }}{{ result?.truncated ? '+' : '' }}</strong></div>
         <div><span>Snapshot</span><strong>{{ result?.sourceSnapshot.snapshotDate ?? '—' }}</strong></div>

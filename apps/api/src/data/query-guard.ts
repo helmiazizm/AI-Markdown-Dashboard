@@ -8,21 +8,35 @@ const forbiddenFunction = /\b(?:read_[a-z0-9_]*|parquet_scan|postgres_[a-z0-9_]*
 const forbiddenCatalog = /\b(?:information_schema|duckdb_[a-z0-9_]*)\b/i
 const threePartName = /\b[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*\b/i
 
+/**
+ * Blanks the contents of single-quoted literals, honouring '' escapes, so that keyword and
+ * identifier scanning inspects SQL structure rather than data values. Without this, a filter on
+ * a value such as 'Clothing Set' or ILIKE '%drop%' is rejected as if it were a SET or DROP
+ * statement. The returned text is for inspection only; callers keep the original SQL.
+ */
+function maskStringLiterals(sql: string): string {
+  return sql.replace(/'(?:[^']|'')*'/g, "''")
+}
+
 export function normalizeReadonlySql(input: string): string {
   const sql = input.trim().replace(/;+\s*$/, '')
   if (!sql) throw new Error('Query is empty')
   if (sql.length > 12_000) throw new Error('Query exceeds 12,000 characters')
+  // Comments, statement separators, and URLs are checked against the raw text. A URL is the
+  // actual attack vector even inside a literal, because it can be handed to a reader function,
+  // whereas a bare keyword inside a literal is inert.
   if (/--|\/\*/.test(sql)) throw new Error('SQL comments are not allowed')
   if (sql.includes(';')) throw new Error('Only one SQL statement is allowed')
   if (/(?:https?|s3|file):\/\//i.test(sql)) throw new Error('External URLs are not allowed')
   if (!/^\s*(?:SELECT|WITH)\b/i.test(sql)) throw new Error('Only SELECT or WITH queries are allowed')
+  const inspected = maskStringLiterals(sql)
   for (const keyword of forbiddenKeywords) {
-    if (new RegExp(`\\b${keyword}\\b`, 'i').test(sql)) throw new Error(`${keyword} is not allowed`)
+    if (new RegExp(`\\b${keyword}\\b`, 'i').test(inspected)) throw new Error(`${keyword} is not allowed`)
   }
-  if (forbiddenFunction.test(sql)) throw new Error('External table and file functions are not allowed')
-  if (forbiddenCatalog.test(sql)) throw new Error('System catalogs are not available')
-  if (/\bsource_data\b/i.test(sql)) throw new Error('source_data is not a warehouse relation; use project.schema.table')
-  if (!threePartName.test(sql)) throw new Error('Query must read from a governed project.schema.table relation')
+  if (forbiddenFunction.test(inspected)) throw new Error('External table and file functions are not allowed')
+  if (forbiddenCatalog.test(inspected)) throw new Error('System catalogs are not available')
+  if (/\bsource_data\b/i.test(inspected)) throw new Error('source_data is not a warehouse relation; use project.schema.table')
+  if (!threePartName.test(inspected)) throw new Error('Query must read from a governed project.schema.table relation')
   return sql
 }
 

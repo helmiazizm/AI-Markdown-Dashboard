@@ -39,6 +39,28 @@ describe('DuckDB query guard', () => {
     expect(() => normalizeReadonlySql(sql)).toThrow()
   })
 
+  // Regression: the keyword scan used to run over the raw SQL, so a data value containing a
+  // standalone SQL word failed the run. 'SET is not allowed' was hit in production.
+  it.each([
+    ["a value containing SET", "SELECT article_type FROM fashion.catalog.products WHERE article_type = 'Clothing Set'"],
+    ["a pattern containing drop", "SELECT product_display_name FROM fashion.catalog.products WHERE product_display_name ILIKE '%drop%'"],
+    ["a value containing UPDATE", "SELECT usage FROM fashion.catalog.products WHERE usage <> 'Update'"],
+    ["a value containing LOAD", "SELECT usage FROM fashion.catalog.products WHERE usage = 'Load Bearing'"],
+    ["an escaped quote around COPY", "SELECT base_colour FROM fashion.catalog.products WHERE base_colour = 'it''s a COPY'"],
+    ["a statement separator inside a literal", "SELECT base_colour FROM fashion.catalog.products WHERE base_colour <> 'DROP TABLE x'"],
+    ["OFFSET, which the word boundary already allowed", 'SELECT gender FROM fashion.catalog.products LIMIT 10 OFFSET 5'],
+  ])('accepts %s', (_label, sql) => {
+    expect(() => normalizeReadonlySql(sql)).not.toThrow()
+  })
+
+  it.each([
+    ['a real SET statement is still rejected', 'SELECT 1 FROM fashion.catalog.products WHERE 1 = 1 SET x = 2'],
+    ['a real DROP outside a literal is still rejected', 'SELECT * FROM fashion.catalog.products WHERE x = 1 DROP TABLE y'],
+    ['a masked literal cannot smuggle a relation reference', "SELECT 1 WHERE 'fashion.catalog.products' = 'x'"],
+  ])('%s', (_label, sql) => {
+    expect(() => normalizeReadonlySql(sql)).toThrow()
+  })
+
   it('accepts a serialized SELECT AST and rejects another table', () => {
     const safe = JSON.stringify({ error: false, statements: [{ node: { type: 'SELECT_NODE', from: { type: 'BASE_TABLE', catalog_name: 'fashion', schema_name: 'catalog', table_name: 'products' } } }] })
     expect(() => validateSerializedAst(safe, governed)).not.toThrow()

@@ -104,16 +104,34 @@ export interface QueryResultSnapshot {
   }
 }
 
-export type GenerationEventType =
-  | 'queued'
-  | 'inspecting'
-  | 'querying'
-  | 'composing'
-  | 'validating'
-  | 'publishing'
-  | 'publication_blocked'
-  | 'completed'
-  | 'failed'
+/**
+ * The single source of truth for generation stages. The SSE endpoint names each frame after the
+ * event type, so a client that subscribes to a hand-maintained subset silently drops whatever it
+ * has not heard of — which is exactly how the crew's planning, designing, and reviewing stages
+ * went missing from the trail. Clients must iterate this array rather than repeat it.
+ */
+export const generationEventTypes = [
+  'queued',
+  'inspecting',
+  'planning',
+  'querying',
+  'designing',
+  'composing',
+  'reviewing',
+  'validating',
+  'publishing',
+  'publication_blocked',
+  'completed',
+  'failed',
+] as const
+
+export type GenerationEventType = typeof generationEventTypes[number]
+
+export const terminalGenerationEventTypes = ['completed', 'failed', 'publication_blocked'] as const
+
+export function isTerminalGenerationEvent(type: GenerationEventType): boolean {
+  return (terminalGenerationEventTypes as readonly string[]).includes(type)
+}
 
 export type GenerationDetailLevel = 'standard' | 'detailed'
 
@@ -264,7 +282,7 @@ export interface HealthResponse {
   warehouse: boolean
   minio: boolean
   minioSnapshot: boolean
-  agentMode: 'demo' | 'cline'
+  agentMode: 'demo' | 'cline' | 'crew'
   openRouterConfigured: boolean
   repository: {
     enabled: boolean
@@ -337,18 +355,54 @@ export const fieldboardProvenanceSchema = z.object({
 
 export type FieldboardProvenanceV1 = z.infer<typeof fieldboardProvenanceSchema>
 
-export function extractWidgetReferences(markdown: string): string[] {
-  const references: string[] = []
+export const widgetSpanSchema = z.enum(['full', 'half'])
+
+export type WidgetSpan = z.infer<typeof widgetSpanSchema>
+
+/**
+ * A dashboard fence places exactly one widget. `span` is optional and defaults to 'full',
+ * so bundles authored before spans existed stay valid. Unknown keys are rejected so a typo
+ * such as {"widgetId":"x","spann":"half"} fails at generation time instead of silently
+ * rendering full width.
+ */
+export const dashboardFenceSchema = z.strictObject({
+  widgetId: z.string().min(1),
+  span: widgetSpanSchema.default('full'),
+})
+
+export interface WidgetPlacement {
+  widgetId: string
+  span: WidgetSpan
+}
+
+export function scanWidgetPlacements(markdown: string): { placements: WidgetPlacement[]; errors: string[] } {
+  const placements: WidgetPlacement[] = []
+  const errors: string[] = []
   const fence = /```dashboard\s*\n([\s\S]*?)\n```/g
+  let position = 0
   for (const match of markdown.matchAll(fence)) {
+    position += 1
+    let raw: unknown
     try {
-      const value = JSON.parse(match[1] ?? '') as { widgetId?: unknown }
-      if (typeof value.widgetId === 'string') references.push(value.widgetId)
+      raw = JSON.parse(match[1] ?? '')
     } catch {
-      references.push('__invalid__')
+      errors.push(`Dashboard fence ${position} does not contain valid JSON`)
+      continue
     }
+    const parsed = dashboardFenceSchema.safeParse(raw)
+    if (!parsed.success) {
+      const detail = parsed.error.issues.map((issue) => `${issue.path.join('.') || 'fence'}: ${issue.message}`).join(', ')
+      errors.push(`Dashboard fence ${position} is invalid (${detail})`)
+      continue
+    }
+    placements.push({ widgetId: parsed.data.widgetId, span: parsed.data.span })
   }
-  return references
+  return { placements, errors }
+}
+
+export function extractWidgetReferences(markdown: string): string[] {
+  const { placements, errors } = scanWidgetPlacements(markdown)
+  return [...placements.map((placement) => placement.widgetId), ...errors.map(() => '__invalid__')]
 }
 
 const unsafeOptionKeys = new Set(['__proto__', 'prototype', 'constructor'])
@@ -412,13 +466,19 @@ export function validateDashboardArtifact(input: unknown): DashboardArtifactV1 {
     issues.push('Markdown contains executable HTML')
   }
 
-  const references = extractWidgetReferences(artifact.markdown)
-  if (references.length === 0) issues.push('Markdown must contain at least one dashboard fence')
+  const { placements, errors } = scanWidgetPlacements(artifact.markdown)
+  issues.push(...errors)
+  if (placements.length === 0 && errors.length === 0) issues.push('Markdown must contain at least one dashboard fence')
+  const references = placements.map((placement) => placement.widgetId)
   for (const reference of references) {
     if (!widgetIds.has(reference)) issues.push(`Markdown references an unknown widget: ${reference}`)
   }
   for (const widgetId of widgetIds) {
     if (!references.includes(widgetId)) issues.push(`Widget ${widgetId} is not referenced by Markdown`)
+  }
+  const duplicatePlacements = references.filter((reference, index) => references.indexOf(reference) !== index)
+  for (const duplicate of new Set(duplicatePlacements)) {
+    issues.push(`Widget ${duplicate} is placed by more than one dashboard fence`)
   }
 
   if (issues.length > 0) throw new Error(issues.join('; '))
