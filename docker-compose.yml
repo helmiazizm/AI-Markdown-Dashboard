@@ -1,0 +1,115 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fieldboard}
+      POSTGRES_USER: ${POSTGRES_USER:-fieldboard}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fieldboard}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fieldboard} -d ${POSTGRES_DB:-fieldboard}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio_data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mc alias set local http://minio:9000 ${MINIO_ACCESS_KEY:-minioadmin} ${MINIO_SECRET_KEY:-minioadmin}
+        && mc mb --ignore-existing local/${MINIO_BUCKET:-analytics}
+        && mc anonymous set none local/${MINIO_BUCKET:-analytics}
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fieldboard}:${POSTGRES_PASSWORD:-fieldboard}@postgres:5432/${POSTGRES_DB:-fieldboard}
+      WAREHOUSE_DIR: /data/warehouse
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-analytics}
+      MINIO_USE_SSL: "false"
+      AGENT_MODE: ${AGENT_MODE:-demo}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-anthropic/claude-sonnet-4.6}
+      AGENT_MAX_ITERATIONS: ${AGENT_MAX_ITERATIONS:-12}
+      AGENT_MAX_TOKENS_PER_TURN: ${AGENT_MAX_TOKENS_PER_TURN:-8192}
+      AGENT_MAX_COST_USD: ${AGENT_MAX_COST_USD:-1}
+      AGENT_RUN_TIMEOUT_MS: ${AGENT_RUN_TIMEOUT_MS:-900000}
+      QUERY_TIMEOUT_MS: ${QUERY_TIMEOUT_MS:-120000}
+      QUERY_MAX_ROWS: ${QUERY_MAX_ROWS:-500}
+      QUERY_MAX_BYTES: ${QUERY_MAX_BYTES:-2097152}
+      DUCKDB_EXTENSION_DIRECTORY: /app/.duckdb/extensions
+      CONTENT_REPOSITORY_ENABLED: ${CONTENT_REPOSITORY_ENABLED:-true}
+      CONTENT_REPOSITORY_PATH: /content
+      CONTENT_GIT_BRANCH: ${CONTENT_GIT_BRANCH:-main}
+      CONTENT_GIT_AUTHOR_NAME: ${CONTENT_GIT_AUTHOR_NAME:-Fieldboard}
+      CONTENT_GIT_AUTHOR_EMAIL: ${CONTENT_GIT_AUTHOR_EMAIL:-fieldboard@local}
+      API_PORT: 3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./:/app
+      - api_node_modules:/app/node_modules
+      - ./data/warehouse:/data/warehouse
+      - ${FIELDBOARD_CONTENT_PATH:-./fieldboard_content}:/content
+    command: >-
+      sh -c "npm run build -w @fieldboard/contracts
+      && npm run migrate -w @fieldboard/api
+      && npm run data:init -w @fieldboard/api
+      && npm run dev -w @fieldboard/api"
+    ports:
+      - "127.0.0.1:${API_PORT:-3000}:3000"
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    environment:
+      VITE_API_PROXY_TARGET: http://api:3000
+    depends_on:
+      api:
+        condition: service_started
+    volumes:
+      - ./:/app
+      - web_node_modules:/app/node_modules
+    command: sh -c "npm run build -w @fieldboard/contracts && npm run dev -w @fieldboard/web -- --host 0.0.0.0 --force"
+    ports:
+      - "127.0.0.1:${WEB_PORT:-5173}:5173"
+
+volumes:
+  postgres_data:
+  minio_data:
+  api_node_modules:
+  web_node_modules:

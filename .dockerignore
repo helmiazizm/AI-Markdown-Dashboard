@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+**/dist
+.git
+.env
+output
+data
+playwright-report
+test-results
+.duckdb
+**/.duckdb
+*.tsbuildinfo
+fieldboard_content

@@ -1,0 +1,32 @@
+{
+  "name": "fieldboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @fieldboard/contracts && npm run build -w @fieldboard/api && npm run build -w @fieldboard/web",
+    "dev": "npm run build -w @fieldboard/contracts && npm-run-all --parallel dev:api dev:web",
+    "dev:api": "npm run dev -w @fieldboard/api",
+    "dev:web": "npm run dev -w @fieldboard/web",
+    "migrate": "npm run migrate -w @fieldboard/api",
+    "data:init": "npm run data:init -w @fieldboard/api",
+    "data:backfill-summaries": "npm run data:backfill-summaries -w @fieldboard/api",
+    "data:load-tlc-yellow": "npm run data:load-tlc-yellow -w @fieldboard/api",
+    "data:load-fashion-catalog": "npm run data:load-fashion-catalog -w @fieldboard/api",
+    "test": "npm run build -w @fieldboard/contracts && npm run test -w @fieldboard/contracts && npm run test -w @fieldboard/api && npm run test -w @fieldboard/web",
+    "test:e2e": "playwright test",
+    "typecheck": "npm run build -w @fieldboard/contracts && npm run typecheck -w @fieldboard/api && npm run typecheck -w @fieldboard/web"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fieldboard Dashboard Author"
+  short_description: "Author governed Markdown-first dashboards"
+  default_prompt: "Use $fieldboard-author-dashboard to create or revise a dashboard from the active governed source."
