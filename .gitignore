@@ -17,3 +17,4 @@ apps/web/public/vendor/
 *.tsbuildinfo
 .duckdb/
 **/.duckdb/
+fieldboard_content/

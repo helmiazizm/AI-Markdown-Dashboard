@@ -73,7 +73,11 @@ export async function openProjectDatabase(project: string, options?: {
 }): Promise<DuckDBConnection> {
   await ensureWarehouseDirectory()
   const config = getConfig()
-  const instance = await DuckDBInstance.create(warehouseFilePath(project), {
+  // fromCache, not create: every create() on the same path yields an independent
+  // instance holding its own view of the file. Callers only close the connection,
+  // so the leaked instances checkpoint a stale view over freshly loaded data on
+  // process exit and silently truncate the relation. One instance per path fixes it.
+  const instance = await DuckDBInstance.fromCache(warehouseFilePath(project), {
     threads: options?.threads ?? '4',
     memory_limit: options?.memoryLimit ?? '4GB',
     extension_directory: path.resolve(config.DUCKDB_EXTENSION_DIRECTORY),

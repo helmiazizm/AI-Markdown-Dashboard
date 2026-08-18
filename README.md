@@ -52,7 +52,7 @@ make setup
 
 `GET /api/health` reports warehouse, MinIO, repository readiness, and registered relations.
 
-The default `AGENT_MODE=demo` is deterministic and spends no LLM credits. Its example counts rows in each registered catalog relation.
+The default `AGENT_MODE=crew` runs the OpenRouter agent crew. Set `AGENT_MODE=demo` for a deterministic run that spends no LLM credits; its example counts rows in each registered catalog relation.
 
 The easiest way to author a real dashboard is Claude Code with the in-tree skill. You do not need OpenRouter or `AGENT_MODE=cline` for that path.
 
