@@ -48,6 +48,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
+      args:
+        APP_UID: ${FIELDBOARD_UID:-1000}
+        APP_GID: ${FIELDBOARD_GID:-1000}
+    # Write into the bind-mounted content repository and warehouse as the host
+    # user, so published dashboards stay editable without a sudo chown.
+    user: "${FIELDBOARD_UID:-1000}:${FIELDBOARD_GID:-1000}"
     environment:
       NODE_ENV: development
       DATABASE_URL: postgresql://${POSTGRES_USER:-fieldboard}:${POSTGRES_PASSWORD:-fieldboard}@postgres:5432/${POSTGRES_DB:-fieldboard}
@@ -103,6 +109,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
+      args:
+        APP_UID: ${FIELDBOARD_UID:-1000}
+        APP_GID: ${FIELDBOARD_GID:-1000}
+    # Write into the bind-mounted content repository and warehouse as the host
+    # user, so published dashboards stay editable without a sudo chown.
+    user: "${FIELDBOARD_UID:-1000}:${FIELDBOARD_GID:-1000}"
     environment:
       NODE_ENV: development
       DATABASE_URL: postgresql://${POSTGRES_USER:-fieldboard}:${POSTGRES_PASSWORD:-fieldboard}@postgres:5432/${POSTGRES_DB:-fieldboard}
@@ -127,6 +139,10 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+      # Let api create the api_node_modules volume first. Two services populating
+      # the same empty named volume at once races and fails on a clean checkout.
+      api:
+        condition: service_started
     volumes:
       - ./:/app
       - api_node_modules:/app/node_modules
@@ -140,6 +156,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.web
+      args:
+        APP_UID: ${FIELDBOARD_UID:-1000}
+        APP_GID: ${FIELDBOARD_GID:-1000}
+    # copy-vendor and the vite dep cache write into the bind-mounted source tree.
+    user: "${FIELDBOARD_UID:-1000}:${FIELDBOARD_GID:-1000}"
     environment:
       VITE_API_PROXY_TARGET: http://api:3000
     depends_on:

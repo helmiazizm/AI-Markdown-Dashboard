@@ -1,5 +1,11 @@
 SHELL := /bin/sh
 FIELDBOARD_CONTENT_PATH ?= ./fieldboard_content
+# The api and content-indexer containers run as this uid/gid so everything they
+# write into the content repository stays owned by the invoking host user.
+FIELDBOARD_UID ?= $(shell id -u)
+FIELDBOARD_GID ?= $(shell id -g)
+export FIELDBOARD_UID
+export FIELDBOARD_GID
 FIELDBOARD_SKILL_PATH ?= .claude/skills/fieldboard-author-dashboard
 CONTENT_ABS := $(abspath $(FIELDBOARD_CONTENT_PATH))
 CONTENT_PARENT := $(patsubst %/,%,$(dir $(CONTENT_ABS)))
@@ -35,9 +41,9 @@ down:
 
 purge:
 	docker compose down -v --remove-orphans
-	@# Fieldboard commits into the content repository from the api container, which
-	@# runs as root, so parts of it are not removable by the host user. Delete them
-	@# from a throwaway root container first, then clean up whatever is left.
+	@# The api container now runs as the host user, but repositories created before
+	@# that change still hold root-owned files the host user cannot remove. Delete
+	@# them from a throwaway root container first, then clean up whatever is left.
 	-docker run --rm -v "$(abspath .):/purge-repo" -v "$(CONTENT_PARENT):/purge-content" alpine:3 \
 	  sh -c 'rm -rf /purge-repo/data/warehouse /purge-repo/data/raw "/purge-content/$(CONTENT_NAME)"'
 	rm -rf data/warehouse data/raw "$(FIELDBOARD_CONTENT_PATH)"

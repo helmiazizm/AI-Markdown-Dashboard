@@ -7,6 +7,10 @@ RUN sed -i 's#deb\.debian\.org/debian-security#security.debian.org/debian-securi
   && apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git \
   && rm -rf /var/lib/apt/lists/*
+# Run as the host user so files written into the bind-mounted content repository
+# and warehouse stay editable from the host. Overridden per-host by FIELDBOARD_UID/GID.
+ARG APP_UID=1000
+ARG APP_GID=1000
 WORKDIR /app
 COPY package.json package-lock.json* ./
 COPY packages/contracts/package.json packages/contracts/package.json
@@ -14,5 +18,8 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
 RUN npm install
 COPY . .
+# Chown after COPY so the api_node_modules volume initializes owned by the app
+# user rather than root; a root-owned volume is not writable by a non-root container.
+RUN chown -R ${APP_UID}:${APP_GID} /app
 EXPOSE 3000
 CMD ["npm", "run", "dev", "-w", "@fieldboard/api"]
