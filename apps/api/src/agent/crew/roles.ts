@@ -10,11 +10,11 @@ const WAREHOUSE = `Treat get_source_context as authoritative for this run: it li
 
 export const plannerSystemPrompt = `${BOUNDARY}
 
-You are the PLANNER. You decide what the dashboard will argue and what evidence it needs, then hand a binding contract to an analyst and a designer who work in parallel and cannot see each other's output.
+You are the PLANNER. You decide what the dashboard will argue and what evidence it needs, then hand a binding contract to an analyst, whose tested output the designer then encodes against.
 
 ${WAREHOUSE}
 
-Your plan is a contract, not a suggestion. The most important field is each dataset's expectedColumns: the analyst must return exactly those column names, and the designer encodes charts against them before any query has run. Choose column names that are lowercase, specific, and unit-bearing where it helps (revenue_musd, trips, avg_total_usd, share_pct) — never generic names like value, count, or x.
+Your plan is a contract, not a suggestion. The most important field is each dataset's expectedColumns: the analyst must return exactly those column names, and every widget you plan is built from them. Choose column names that are lowercase, specific, and unit-bearing where it helps (revenue_musd, trips, avg_total_usd, share_pct) — never generic names like value, count, or x.
 
 Every dataset id, widget id, and expected column name must match ^[a-z][a-z0-9_-]{1,63}$: start with a lowercase letter, then lowercase letters, digits, underscores or hyphens, and at least two characters overall. A single-letter alias such as n or a name with a capital, a space or a dot is rejected before any query runs, and the rejection does not explain which name was at fault. Spell the column out.
 
@@ -52,6 +52,7 @@ Depth is the requirement. A total with no comparison is not an analysis. For eve
 
 Column contract:
 - Return exactly the expectedColumns the planner specified, aliased with those names. A mismatch fails the entire generation.
+- The designer encodes every chart against what you return, so your columns and your findings are what the charts are built from.
 - If a planned column is genuinely impossible or wrong, you must declare it in amendments with the corrected expectedColumns and a reason. Never silently return different columns. Any name you introduce must match ^[a-z][a-z0-9_-]{1,63}$, so at least two characters, lowercase, no dots or spaces.
 
 Every SQL statement must be a single DuckDB SELECT or WITH with no comments and no semicolon, alias every derived column, filter nulls explicitly, order deterministically, bound high-cardinality rankings, and return only the columns the chart and narrative use.
@@ -66,7 +67,9 @@ You will normally be asked for only the datasets that change. Everything marked 
 
 export const layoutSystemPrompt = `${BOUNDARY}
 
-You are the DESIGNER. You work in parallel with the analyst and will NOT see any query results — you design against the planner's contract, encoding charts against the expectedColumns the analyst is bound to produce. You have no warehouse access.
+You are the DESIGNER. You run after the analyst, so you are given the findings, the columns each query actually returns, and a bounded profile of what it returned: the row count and a few example rows. Encode charts against those columns, not against anything the plan predicted. You have no warehouse access of your own.
+
+Use the profile rather than guessing. The row count is how many bars, slices or points the chart will really draw, so it decides the form: a ranking of 30 categories is a horizontal bar and never a pie, and a series of 3 points is a bar rather than a line. The example rows show magnitude and units, so they decide axis names, and whether a measure reads better in thousands or millions. If a profile is absent, say so to yourself and choose conservatively from the columns and the question.
 
 Your ECharts options are JSON only: no functions, no prototype keys, no external URLs. The host injects dataset.dimensions and dataset.source from the query result, so encode series by column name with series[].encode. Never set dataset, series[].data, axis data, or any other source of rows — those are the host's, and a submission that carries them is rejected. Do not set backgroundColor. A legend may name its series with legend.data, since those are labels rather than rows.
 
@@ -199,7 +202,23 @@ export function buildAnalysisPrompt(input: { prompt: string; brief: DashboardBri
   return sections.join('\n\n')
 }
 
-export function buildLayoutPrompt(input: { prompt: string; brief: DashboardBrief; revision?: RevisionContext }): string {
+/** A dataset as the analyst actually delivered it, with what its tested query returned. */
+export interface AnalysedDataset {
+  id: string
+  question: string
+  expectedColumns: string[]
+  finding: string
+  caveats: string[]
+  profile?: { columns: string[]; rowCount: number; truncated: boolean; exampleRows: unknown[] }
+}
+
+export function buildLayoutPrompt(input: {
+  prompt: string
+  brief: DashboardBrief
+  revision?: RevisionContext
+  headline: string
+  analysed: AnalysedDataset[]
+}): string {
   const sections = input.revision
     ? [...revisionSections(input.revision), `The follow-up request:\n${input.prompt}`]
     : [`Original request:\n${input.prompt}`]
@@ -209,7 +228,12 @@ export function buildLayoutPrompt(input: { prompt: string; brief: DashboardBrief
     sections.push(...changePlanSection(input.brief))
     sections.push(`The widgets already published. Return a kept widget's option object exactly as it appears here:\n${JSON.stringify(designerView(input.revision), null, 2)}`)
   }
-  sections.push(`Design the widgets and document outline for this brief. The analyst is producing these datasets in parallel; encode against their expectedColumns, which are contractually fixed:\n${JSON.stringify(input.brief.datasets, null, 2)}`)
+  sections.push(`What the analyst concluded:\n${input.headline}`)
+  sections.push(`The datasets as delivered. expectedColumns is what each query actually returns, amendments already applied, so encode against exactly these names. Where a profile is present it is what the tested query returned: rowCount is how many categories or points the chart will actually draw, and exampleRows shows their shape and magnitude.\n${JSON.stringify(input.analysed, null, 2)}`)
+  const unprofiled = input.analysed.filter((dataset) => !dataset.profile).map((dataset) => dataset.id)
+  if (unprofiled.length > 0) {
+    sections.push(`No tested result was captured for ${unprofiled.join(', ')}, so choose a chart form from the columns and the question rather than assuming a row count.`)
+  }
   sections.push(`Planned widgets and their intent:\n${JSON.stringify(input.brief.widgets, null, 2)}`)
   sections.push(`Narrative skeleton to shape the outline:\n${JSON.stringify(input.brief.narrativeSkeleton, null, 2)}`)
   return sections.join('\n\n')

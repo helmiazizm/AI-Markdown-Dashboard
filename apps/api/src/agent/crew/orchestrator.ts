@@ -109,7 +109,21 @@ function sourceContextTool(input: AgentRunInput, role: CrewRole): RoleTool {
   }
 }
 
-function queryTool(input: AgentRunInput, role: CrewRole, budget: number, state: { count: number }): RoleTool {
+/** What a tested query actually returned, kept so the designer can encode against real shape. */
+export interface DatasetProfile {
+  columns: string[]
+  rowCount: number
+  truncated: boolean
+  exampleRows: unknown[]
+}
+
+function queryTool(
+  input: AgentRunInput,
+  role: CrewRole,
+  budget: number,
+  state: { count: number },
+  observed?: Map<string, DatasetProfile>,
+): RoleTool {
   const config = getConfig()
   return {
     name: 'run_readonly_query',
@@ -127,6 +141,21 @@ function queryTool(input: AgentRunInput, role: CrewRole, budget: number, state: 
         : undefined)
       try {
         const result = await executeDatasetQuery({ ...request, id: `crew-${role}-${queryNumber}` })
+        // Keyed by the normalised statement so a dataset submitted later can be matched to the
+        // run that tested it. Only three rows are kept: enough to show shape, small enough to
+        // hand to another role.
+        if (observed) {
+          try {
+            observed.set(normalizeReadonlySql(request.sql), {
+              columns: result.columns,
+              rowCount: result.rowCount,
+              truncated: result.truncated,
+              exampleRows: result.rows.slice(0, 3),
+            })
+          } catch {
+            // A statement the guard will not normalise cannot be matched later; skip it.
+          }
+        }
         if (input.detailLevel === 'detailed') {
           await input.onStage('querying', `The ${ROLE_NAMES[role]}'s query ${queryNumber} returned ${result.rowCount.toLocaleString()} rows across ${result.columns.length} columns.`, {
             kind: 'query_result', role, queryNumber, columns: result.columns, rowCount: result.rowCount, truncated: result.truncated,
@@ -196,6 +225,19 @@ function submitTool<T>(
   }
 }
 
+/**
+ * Matches a submitted dataset to the run that tested it. The analyst is told to test every final
+ * query, so this normally hits; a statement it never ran simply has no profile, and the designer
+ * is told as much rather than being handed a guess.
+ */
+function profileFor(sql: string, observed: Map<string, DatasetProfile>): DatasetProfile | undefined {
+  try {
+    return observed.get(normalizeReadonlySql(sql))
+  } catch {
+    return undefined
+  }
+}
+
 export interface CrewPipelineOptions {
   runRole: RunRole
 }
@@ -252,22 +294,27 @@ export async function runCrewPipeline(
   const brief = briefSlot.value
   if (!brief) throw new Error(briefSlot.error ? `The planner produced no usable brief: ${briefSlot.error}` : 'The planner produced no brief')
 
-  // 2. Analysis and layout in parallel. Only the analyst holds a query tool, so the parallel
-  //    phase can never put two DuckDB workers in flight.
-  await input.onStage('designing', 'Analysing the warehouse and designing the layout in parallel.')
+  // 2. Analysis, then layout. These used to run in parallel, which meant the designer encoded
+  //    every chart against the planner's predicted columns without ever seeing what the warehouse
+  //    returned: it could not tell 3 categories from 30, it had no findings to write titles and
+  //    accessibility text against, and an amended column contract reached it too late to honour.
+  //    Running it second costs its own latency on the critical path and buys all three back, plus
+  //    it means a failed analyst no longer pays for a design nobody can use.
   const analysisSlot: SubmissionSlot<AnalysisSubmission> = {}
   const layoutSlot: SubmissionSlot<LayoutSubmission> = {}
   const analysisQueries = { count: 0 }
+  const observed = new Map<string, DatasetProfile>()
 
-  const [analysisOutcome, layoutOutcome] = await Promise.allSettled([
-    options.runRole({
+  await input.onStage('designing', 'Analysing the warehouse.')
+  try {
+    const analysisResult = await options.runRole({
       role: 'analysis',
       modelId: roleModel('analysis'),
       systemPrompt: analysisSystemPrompt,
       prompt: buildAnalysisPrompt({ prompt: input.prompt, brief, revision }),
       tools: [
         sourceContextTool(input, 'analysis'),
-        queryTool(input, 'analysis', config.CREW_ANALYSIS_QUERY_BUDGET, analysisQueries),
+        queryTool(input, 'analysis', config.CREW_ANALYSIS_QUERY_BUDGET, analysisQueries, observed),
         submitTool('submit_analysis', 'Submit the tested SQL and findings for every planned dataset. This is the only way to finish the analysis.', analysisSubmissionSchema, analysisSlot, async (analysis) => {
           await input.onStage('composing', `Analysis accepted for ${analysis.datasets.length} datasets.`, input.detailLevel === 'detailed'
             ? { kind: 'crew_analysis', headline: analysis.headline, amendments: analysis.amendments, cannotEstablish: analysis.cannotEstablish }
@@ -281,12 +328,37 @@ export async function runCrewPipeline(
         : analysisSlot.error
           ? `The analysis was not accepted: ${analysisSlot.error}. Correct it and call submit_analysis again.`
           : 'You must call submit_analysis with tested SQL and findings before finishing.',
-    }),
-    options.runRole({
+    })
+    usageByRole.analysis = analysisResult.usage
+  } catch (error) {
+    usageByRole.analysis = { error: error instanceof Error ? error.message : String(error) }
+  }
+
+  const analysis = analysisSlot.value
+  if (!analysis) {
+    const detail = analysisSlot.error ?? (usageByRole.analysis as { error?: string } | undefined)?.error ?? 'no submission'
+    throw new Error(`The analyst produced no usable analysis: ${detail}`)
+  }
+
+  // The columns the analyst is actually bound to, amendments applied, so the designer never
+  // encodes against a name the dataset no longer produces.
+  const amended = new Map(analysis.amendments.map((amendment) => [amendment.datasetId, amendment.expectedColumns]))
+  const analysed = analysis.datasets.map((dataset) => ({
+    id: dataset.id,
+    question: dataset.question,
+    expectedColumns: amended.get(dataset.id) ?? dataset.expectedColumns,
+    finding: dataset.finding,
+    caveats: dataset.caveats,
+    profile: profileFor(dataset.sql, observed),
+  }))
+
+  await input.onStage('designing', 'Designing the layout against the analysis results.')
+  try {
+    const layoutResult = await options.runRole({
       role: 'layout',
       modelId: roleModel('layout'),
       systemPrompt: layoutSystemPrompt,
-      prompt: buildLayoutPrompt({ prompt: input.prompt, brief, revision }),
+      prompt: buildLayoutPrompt({ prompt: input.prompt, brief, revision, headline: analysis.headline, analysed }),
       tools: [
         sourceContextTool(input, 'layout'),
         submitTool('submit_layout', 'Submit the widget specifications and document outline. This is the only way to finish the design.', layoutSubmissionSchema, layoutSlot, async (layout) => {
@@ -308,22 +380,17 @@ export async function runCrewPipeline(
         : layoutSlot.error
           ? `The layout was not accepted: ${layoutSlot.error}. Correct it and call submit_layout again.`
           : 'You must call submit_layout with widget options and a document outline before finishing.',
-    }),
-  ])
-
-  usageByRole.analysis = analysisOutcome.status === 'fulfilled' ? analysisOutcome.value.usage : { error: String(analysisOutcome.reason) }
-  usageByRole.layout = layoutOutcome.status === 'fulfilled' ? layoutOutcome.value.usage : { error: String(layoutOutcome.reason) }
-
-  const analysis = analysisSlot.value
-  if (!analysis) {
-    const detail = analysisSlot.error ?? (analysisOutcome.status === 'rejected' ? String(analysisOutcome.reason) : 'no submission')
-    throw new Error(`The analyst produced no usable analysis: ${detail}`)
+    })
+    usageByRole.layout = layoutResult.usage
+  } catch (error) {
+    usageByRole.layout = { error: error instanceof Error ? error.message : String(error) }
   }
+
   // A design rejected only for the shape of its outline still carries usable chart specs, so
   // the salvaged part is preferred over dropping every widget to a default option.
   const layout = layoutSlot.value ?? layoutSlot.salvaged
   if (!layoutSlot.value) {
-    const error = layoutSlot.error ?? (layoutOutcome.status === 'rejected' ? String(layoutOutcome.reason) : 'no submission')
+    const error = layoutSlot.error ?? (usageByRole.layout as { error?: string } | undefined)?.error ?? 'no submission'
     await input.onStage('designing', layout
       ? `The designer's submission was rejected; keeping the ${layout.widgets.length} chart specifications that validated and rebuilding the outline.`
       : 'The designer did not deliver; falling back to default chart options.', input.detailLevel === 'detailed'

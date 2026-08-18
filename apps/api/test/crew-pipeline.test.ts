@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { resetConfigForTests } from '../src/config.js'
 import { assembleArtifact, defaultChartOption } from '../src/agent/crew/fallbacks.js'
 import { runCrewPipeline, type RoleRunRequest, type RunRole } from '../src/agent/crew/orchestrator.js'
+import { buildLayoutPrompt } from '../src/agent/crew/roles.js'
 import { layoutSubmissionSchema, normalizeLayoutSubmission, salvageLayoutSubmission } from '../src/agent/crew/contracts.js'
 import type { AgentRunInput } from '../src/agent/runner.js'
 import { digestArtifact, type RevisionContext } from '../src/agent/revision-context.js'
@@ -580,5 +581,102 @@ describe('crew revisions of a skill-authored dashboard', () => {
     expect(plannerPrompt).not.toContain('authored outside the crew')
     // The derived brief is present either way.
     expect(plannerPrompt).toContain('What this dashboard already argues')
+  })
+})
+
+describe('the designer runs on the analysis rather than beside it', () => {
+  beforeEach(() => {
+    resetConfigForTests()
+    process.env.CREW_REVIEW_QUERY_BUDGET = '0'
+  })
+
+  function capture(payloads: Partial<Record<string, unknown>>): { prompts: Map<string, string>; order: string[]; run: () => Promise<unknown> } {
+    const prompts = new Map<string, string>()
+    const order: string[] = []
+    return {
+      prompts,
+      order,
+      run: () => runCrewPipeline(makeInput([]), {
+        runRole: async (request) => {
+          order.push(request.role)
+          prompts.set(request.role, request.prompt)
+          const submit = request.tools.find((tool) => tool.name.startsWith('submit_'))!
+          const payload = payloads[request.role]
+          if (payload === undefined) throw new Error(`role ${request.role} failed`)
+          await submit.execute(payload as never)
+          return {}
+        },
+      }),
+    }
+  }
+
+  it('hands the designer the analyst headline, findings and delivered columns', async () => {
+    const probe = capture({ planner: brief, analysis, layout, reviewer: assembleArtifact(brief, analysis, layout) })
+    await probe.run()
+    expect(probe.order).toEqual(['planner', 'analysis', 'layout', 'reviewer'])
+    const designer = probe.prompts.get('layout') ?? ''
+    expect(designer).toContain(analysis.headline)
+    expect(designer).toContain('February trails January in total trips')
+    expect(designer).toContain('What the analyst concluded')
+    // No query ran in this scripted run, so the designer is told the profile is missing rather
+    // than being left to assume a row count.
+    expect(designer).toContain('No tested result was captured for monthly-volume')
+  })
+
+  it('gives the designer the amended columns, not the ones the planner predicted', async () => {
+    const amendedAnalysis = {
+      ...analysis,
+      datasets: [{ ...analysis.datasets[0]!, expectedColumns: ['data_month', 'trips'] }],
+      amendments: [{ datasetId: 'monthly-volume', expectedColumns: ['data_month', 'trips'], reason: 'revenue_musd was not computable at this grain' }],
+    }
+    const probe = capture({ planner: brief, analysis: amendedAnalysis, layout, reviewer: assembleArtifact(brief, amendedAnalysis, layout) })
+    await probe.run()
+    const designer = probe.prompts.get('layout') ?? ''
+    // The planner asked for revenue_musd; the analyst could not deliver it. Running second is what
+    // lets the designer know that before it encodes anything.
+    const delivered = designer.slice(designer.indexOf('The datasets as delivered'))
+    expect(delivered).toContain('data_month')
+    expect(delivered).toContain('trips')
+    expect(delivered).not.toContain('revenue_musd')
+  })
+
+  it('never pays for a design when the analyst produced nothing', async () => {
+    const probe = capture({ planner: brief, layout, reviewer: assembleArtifact(brief, analysis, layout) })
+    await expect(probe.run()).rejects.toThrow(/analyst produced no usable analysis/)
+    // The designer is not in the order at all: previously it ran in parallel and its tokens were
+    // spent before anyone knew the analysis had failed.
+    expect(probe.order).toEqual(['planner', 'analysis'])
+  })
+})
+
+describe('layout prompt data profile', () => {
+  const analysed = [{
+    id: 'monthly-volume',
+    question: 'How did trips move by month?',
+    expectedColumns: ['data_month', 'trips'],
+    finding: 'March was the strongest month.',
+    caveats: [],
+    profile: {
+      columns: ['data_month', 'trips'],
+      rowCount: 3,
+      truncated: false,
+      exampleRows: [{ data_month: '2026-01-01', trips: 3_400_000 }],
+    },
+  }]
+
+  it('shows what the tested query returned, so the chart form follows the real shape', () => {
+    const prompt = buildLayoutPrompt({ prompt: 'p', brief, headline: 'h', analysed })
+    expect(prompt).toContain('"rowCount": 3')
+    expect(prompt).toContain('3400000')
+    expect(prompt).toContain('amendments already applied')
+    expect(prompt).not.toContain('No tested result was captured')
+  })
+
+  it('names the datasets it could not profile instead of implying a row count', () => {
+    const prompt = buildLayoutPrompt({
+      prompt: 'p', brief, headline: 'h',
+      analysed: [{ ...analysed[0]!, profile: undefined }],
+    })
+    expect(prompt).toContain('No tested result was captured for monthly-volume')
   })
 })
