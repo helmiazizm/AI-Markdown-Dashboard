@@ -99,6 +99,43 @@ services:
     ports:
       - "127.0.0.1:${API_PORT:-3000}:3000"
 
+  content-indexer:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fieldboard}:${POSTGRES_PASSWORD:-fieldboard}@postgres:5432/${POSTGRES_DB:-fieldboard}
+      WAREHOUSE_DIR: /data/warehouse
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-analytics}
+      MINIO_USE_SSL: "false"
+      QUERY_TIMEOUT_MS: ${QUERY_TIMEOUT_MS:-120000}
+      QUERY_MAX_ROWS: ${QUERY_MAX_ROWS:-500}
+      QUERY_MAX_BYTES: ${QUERY_MAX_BYTES:-2097152}
+      DUCKDB_EXTENSION_DIRECTORY: /app/.duckdb/extensions
+      CONTENT_REPOSITORY_ENABLED: ${CONTENT_REPOSITORY_ENABLED:-true}
+      CONTENT_REPOSITORY_PATH: /content
+      CONTENT_GIT_BRANCH: ${CONTENT_GIT_BRANCH:-main}
+      CONTENT_GIT_AUTHOR_NAME: ${CONTENT_GIT_AUTHOR_NAME:-Fieldboard}
+      CONTENT_GIT_AUTHOR_EMAIL: ${CONTENT_GIT_AUTHOR_EMAIL:-fieldboard@local}
+      CONTENT_INDEX_INTERVAL_MS: ${CONTENT_INDEX_INTERVAL_MS:-3000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./:/app
+      - api_node_modules:/app/node_modules
+      - ./data/warehouse:/data/warehouse
+      - ${FIELDBOARD_CONTENT_PATH:-./fieldboard_content}:/content
+    command: >-
+      sh -c "npm run build -w @fieldboard/contracts
+      && npm run content:index -w @fieldboard/api"
+
   web:
     build:
       context: .

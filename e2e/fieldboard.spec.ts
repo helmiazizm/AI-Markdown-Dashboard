@@ -57,7 +57,7 @@ async function mockApi(page: Page): Promise<void> {
 
 test.beforeEach(async ({ page }) => mockApi(page))
 
-test('creates and opens a generated dashboard from the analysis trail', async ({ page }) => {
+test('creates a fieldboard, reviews the trail in a modal, then opens it', async ({ page }) => {
   let requestBody: unknown
   await page.route('**/api/generations', async (route) => {
     requestBody = route.request().postDataJSON()
@@ -66,9 +66,22 @@ test('creates and opens a generated dashboard from the analysis trail', async ({
   await page.goto('/')
   await expect(page.getByRole('heading', { name: /Ask your data/i })).toBeVisible()
   await page.getByRole('textbox', { name: 'What should we investigate?' }).fill('Show assortment and availability')
-  await page.getByRole('checkbox', { name: /Show detailed analysis trail/i }).check()
   await page.getByRole('button', { name: 'Generate fieldboard' }).click()
+  // The trail is captured unconditionally now; there is no detail switch to set.
   expect(requestBody).toEqual({ prompt: 'Show assortment and availability', detailLevel: 'detailed' })
+
+  // Completion presents the fieldboard instead of navigating away from the composer.
+  await expect(page.getByText('Fieldboard ready')).toBeVisible()
+  await expect(page).toHaveURL(/\/$/)
+
+  await page.getByRole('button', { name: /View analysis trail/ }).click()
+  const trail = page.getByRole('dialog', { name: 'Analysis trail' })
+  await expect(trail).toBeVisible()
+  await expect(trail.getByText('Prompt received.')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(trail).toBeHidden()
+
+  await page.getByRole('link', { name: /Open dashboard/ }).click()
   await expect(page).toHaveURL(/\/dashboards\/dashboard-1/)
   await expect(page.getByRole('heading', { name: 'Operations Source Pulse' })).toBeVisible()
 })

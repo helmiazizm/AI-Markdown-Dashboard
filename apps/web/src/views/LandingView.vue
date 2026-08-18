@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import type { DashboardListItem, GenerationEvent, HealthResponse } from '@fieldboard/contracts'
 import { onBeforeUnmount, onMounted, computed, ref } from 'vue'
-import { useRouter } from 'vue-router'
 import AnalysisTrail from '../components/AnalysisTrail.vue'
+import ModalDialog from '../components/ModalDialog.vue'
 import { api, followGeneration } from '../lib/api.js'
 
-const router = useRouter()
 const prompt = ref('')
 const dashboards = ref<DashboardListItem[]>([])
 const health = ref<HealthResponse | null>(null)
@@ -16,9 +15,16 @@ const catalogStamp = computed(() => {
 })
 const events = ref<GenerationEvent[]>([])
 const generating = ref(false)
-const detailedTrail = ref(false)
+const trailOpen = ref(false)
+const completedId = ref('')
+const completed = ref<DashboardListItem | null>(null)
 const error = ref('')
 let stopFollowing: (() => void) | undefined
+
+const latestEvent = computed(() => events.value[events.value.length - 1])
+const statusLine = computed(() => latestEvent.value?.message ?? 'Assembling the analysis crew…')
+const statusStage = computed(() => latestEvent.value?.type.replace('_', ' ') ?? 'queued')
+const runVisible = computed(() => generating.value || events.value.length > 0)
 
 onMounted(async () => {
   const [list, status] = await Promise.allSettled([api.listDashboards(), api.health()])
@@ -30,20 +36,33 @@ onBeforeUnmount(() => stopFollowing?.())
 
 async function generate(): Promise<void> {
   if (generating.value || prompt.value.trim().length < 5) return
+  stopFollowing?.()
   error.value = ''
   events.value = []
+  completed.value = null
+  completedId.value = ''
   generating.value = true
   try {
-    const run = await api.createGeneration(prompt.value.trim(), detailedTrail.value ? 'detailed' : 'standard')
+    // The trail is always captured now: the server only attaches structured payloads at the
+    // detailed level, and the trail is reviewed after the fact rather than opted into up front.
+    const run = await api.createGeneration(prompt.value.trim(), 'detailed')
     stopFollowing = followGeneration(
       run.id,
       (event) => {
         if (!events.value.some((existing) => existing.id === event.id)) events.value.push(event)
       },
-      (status) => {
+      async (status) => {
         generating.value = false
-        if (status.status === 'completed' && status.dashboardId) void router.push(`/dashboards/${status.dashboardId}`)
-        else error.value = status.error ?? 'Generation failed.'
+        if (status.status !== 'completed' || !status.dashboardId) {
+          error.value = status.error ?? 'Generation failed.'
+          return
+        }
+        completedId.value = status.dashboardId
+        // One list refresh both republishes the archive below and supplies the finished
+        // fieldboard's identity for the success panel, which the run status does not carry.
+        const list = await api.listDashboards().catch(() => null)
+        if (list) dashboards.value = list.items
+        completed.value = list?.items.find((item) => item.id === status.dashboardId) ?? null
       },
       (reason) => {
         generating.value = false
@@ -54,6 +73,13 @@ async function generate(): Promise<void> {
     generating.value = false
     error.value = reason instanceof Error ? reason.message : String(reason)
   }
+}
+
+function startAnother(): void {
+  completed.value = null
+  completedId.value = ''
+  events.value = []
+  prompt.value = ''
 }
 
 function formatDate(value: string): string {
@@ -100,24 +126,47 @@ function formatDate(value: string): string {
           rows="3"
           maxlength="4000"
           placeholder="Summarize the most important patterns, compare the relevant segments, and call out unusual changes…"
+          :disabled="generating"
           @keydown.meta.enter="generate"
           @keydown.ctrl.enter="generate"
         ></textarea>
-        <label class="analysis-option">
-          <input v-model="detailedTrail" type="checkbox" :disabled="generating" />
-          <span>
-            <strong>Show detailed analysis trail</strong>
-            <small>Each role's questions, DuckDB SQL, result shape, and validation checks—not private reasoning.</small>
-          </span>
-        </label>
         <div class="composer-actions">
-          <span>⌘ ↵ to generate · governed queries only</span>
+          <span>⌘ ↵ to generate · governed queries only · full trail captured</span>
           <button class="signal-button" :disabled="generating || prompt.trim().length < 5" @click="generate">
             <span>{{ generating ? 'Running analysis' : 'Generate fieldboard' }}</span><span aria-hidden="true">↗</span>
           </button>
         </div>
+
+        <div v-if="runVisible" class="run-status" :class="{ 'is-live': generating }">
+          <span class="run-status-mark" aria-hidden="true"></span>
+          <p class="run-status-line" role="status">
+            <span class="run-status-stage">{{ statusStage }}</span>{{ statusLine }}
+          </p>
+          <button class="text-button" :disabled="!events.length" @click="trailOpen = true">
+            View analysis trail · {{ events.length }}
+          </button>
+        </div>
+
         <p v-if="error" class="error-message" role="alert">{{ error }}</p>
-        <AnalysisTrail v-if="events.length" :events="events" :active="generating" :detailed="detailedTrail" />
+
+        <div v-if="completedId" class="run-complete">
+          <div class="run-complete-copy">
+            <span class="eyebrow signal-text">Fieldboard ready</span>
+            <strong>{{ completed?.title ?? 'Your fieldboard' }}</strong>
+            <p>{{ completed?.summary ?? prompt }}</p>
+            <div class="run-complete-meta">
+              <span>REV {{ completed?.revisionNumber ?? 1 }}</span>
+              <span>{{ completed?.widgetCount ?? 0 }} WIDGETS</span>
+              <span>{{ completed?.gitCommitSha?.slice(0, 8) ?? 'UNCOMMITTED' }}</span>
+            </div>
+          </div>
+          <div class="run-complete-actions">
+            <RouterLink class="signal-button" :to="`/dashboards/${completedId}`">
+              <span>Open dashboard</span><span aria-hidden="true">↗</span>
+            </RouterLink>
+            <button class="text-button" @click="startAnother">Start another</button>
+          </div>
+        </div>
       </div>
       <aside class="composer-note">
         <span class="eyebrow">Bounded crew</span>
@@ -125,6 +174,15 @@ function formatDate(value: string): string {
         <small>The analyst and designer work in parallel against one column contract. No shell, filesystem, or web tools.</small>
       </aside>
     </section>
+
+    <ModalDialog
+      :open="trailOpen"
+      title="Analysis trail"
+      description="Each role's questions, DuckDB SQL, result shape, and validation checks—not private reasoning."
+      @close="trailOpen = false"
+    >
+      <AnalysisTrail v-if="events.length" :events="events" :active="generating" :detailed="true" />
+    </ModalDialog>
 
     <section class="library-section">
       <div class="section-heading content-grid">

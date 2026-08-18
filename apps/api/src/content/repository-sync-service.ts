@@ -44,8 +44,8 @@ interface ValidationPayload {
 
 export async function startRepositoryValidation(input: { expectedHead: string | null; fingerprint: string }): Promise<string> {
   const repository = await getRepositoryStatus()
-  if (!repository.activated || !repository.initialized) throw new Error(repository.error ?? 'Content repository is not active')
-  if (repository.readiness !== 'dirty' && repository.readiness !== 'unindexed') throw new Error('There are no importable repository changes')
+  if (!repository.initialized) throw new Error(repository.error ?? 'Content repository is not active')
+  if (repository.readiness !== 'dirty') throw new Error('There are no importable working-tree changes')
   if (repository.head !== input.expectedHead || repository.fingerprint !== input.fingerprint) {
     const error = new Error('Repository fingerprint changed before validation started')
     error.name = 'StaleRepositoryError'

@@ -1,4 +1,4 @@
-import type { DashboardArtifactV1, GenerationDetailLevel } from '@fieldboard/contracts'
+import type { GenerationDetailLevel } from '@fieldboard/contracts'
 import { getConfig, type AppConfig } from '../config.js'
 import {
   addGenerationEvent,
@@ -10,6 +10,7 @@ import {
 import { artifactSha256, canonicalizeDashboardArtifact } from '../content/codec.js'
 import { prepareGenerationPublication } from '../content/persistence.js'
 import { assertRepositoryReadyForGeneration, publishPreparedRevision } from '../content/publication-service.js'
+import { loadRevisionContext, type RevisionContext } from './revision-context.js'
 import { getAgentAdapter } from './runner.js'
 
 /**
@@ -26,8 +27,10 @@ export async function queueGeneration(input: {
   dashboardId?: string
   baseRevisionId?: string
 }): Promise<string> {
+  // This must stay first: it is what guarantees head === indexedHead, and therefore that the
+  // projection the revision context is about to be read from has caught up with Git.
   const repository = await assertRepositoryReadyForGeneration()
-  let currentArtifact: DashboardArtifactV1 | undefined
+  let revisionContext: RevisionContext | undefined
   let revisionNumber = 1
   if (input.dashboardId) {
     const current = await getCurrentRevision(input.dashboardId)
@@ -37,8 +40,11 @@ export async function queueGeneration(input: {
       error.name = 'StaleRevisionError'
       throw error
     }
-    currentArtifact = current.artifact
     revisionNumber = current.revisionNumber + 1
+    // A snapshot taken now. The projection may be rebuilt while the crew runs, which is safe:
+    // revision ids come from provenance.json and survive a rebuild, and prepareGenerationPublication
+    // rechecks the base under FOR UPDATE before publishing.
+    revisionContext = await loadRevisionContext(input.dashboardId, current.id) ?? undefined
   }
 
   const config = getConfig()
@@ -51,7 +57,7 @@ export async function queueGeneration(input: {
     dashboardId: input.dashboardId,
     baseRevisionId: input.baseRevisionId,
   })
-  setImmediate(() => void runGeneration({ ...input, runId, currentArtifact, revisionNumber, expectedHead: repository.head }))
+  setImmediate(() => void runGeneration({ ...input, runId, revisionContext, revisionNumber, expectedHead: repository.head }))
   return runId
 }
 
@@ -61,7 +67,7 @@ async function runGeneration(input: {
   detailLevel?: GenerationDetailLevel
   dashboardId?: string
   baseRevisionId?: string
-  currentArtifact?: DashboardArtifactV1
+  revisionContext?: RevisionContext
   revisionNumber: number
   expectedHead: string | null
 }): Promise<void> {
@@ -71,7 +77,7 @@ async function runGeneration(input: {
     const result = await getAgentAdapter().generate({
       prompt: input.prompt,
       detailLevel: input.detailLevel ?? 'standard',
-      currentArtifact: input.currentArtifact,
+      revisionContext: input.revisionContext,
       revisionNumber: input.revisionNumber,
       onStage: (type, message, payload) => addGenerationEvent(input.runId, type, message, payload),
     })

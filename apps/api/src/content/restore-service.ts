@@ -2,6 +2,7 @@ import { artifactSha256, canonicalizeDashboardArtifact } from './codec.js'
 import { getCommitTreeSha } from './git-repository.js'
 import { getDashboardContentPath, getRestoreSource, prepareRestorePublication } from './persistence.js'
 import { assertRepositoryReadyForGeneration, publishPreparedRevision } from './publication-service.js'
+import { ensureRevisionSummaries, revisionHasSummaries } from './summaries.js'
 
 export async function restorePublishedRevision(dashboardId: string, sourceRevisionId: string): Promise<{
   revisionId: string
@@ -22,6 +23,9 @@ export async function restorePublishedRevision(dashboardId: string, sourceRevisi
   const artifact = canonicalizeDashboardArtifact(source.artifact)
   const artifactHash = artifactSha256(artifact)
   if (artifactHash !== source.artifactHash) throw new Error('The source revision artifact hash is invalid')
+  if (!await revisionHasSummaries(sourceRevisionId)) {
+    await ensureRevisionSummaries({ dashboardId, revisionId: sourceRevisionId, artifact })
+  }
   const prepared = await prepareRestorePublication({ dashboardId, sourceRevisionId, artifact, artifactHash, expectedHead: repository.head })
   const published = await publishPreparedRevision(prepared.id)
   return { revisionId: published.revisionId, publicationId: published.id, status: published.status }

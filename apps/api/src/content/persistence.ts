@@ -525,71 +525,116 @@ export async function setRepositoryState(input: { head: string | null; indexedHe
   `, [input.head, input.indexedHead ?? null, input.readiness, input.activated ?? null, input.error ?? null])
 }
 
-export async function listAllRevisionsForBootstrap(): Promise<Array<{
+export interface IndexedRevisionRecord {
   dashboardId: string
-  contentPath: string | null
+  contentPath: string
   revisionId: string
   revisionNumber: number
   parentRevisionId: string | null
   restoredFromRevisionId: string | null
-  prompt: string
-  artifact: DashboardArtifactV1
-  model: string
-  createdAt: string
-  currentRevisionId: string | null
-  sourceSnapshot: PreparedPublication['sourceSnapshot']
   sourceKind: RevisionSourceKind
-}>> {
-  const result = await pool.query<{
-    dashboard_id: string; content_path: string | null; revision_id: string; revision_number: number
-    parent_revision_id: string | null; restored_from_revision_id: string | null; prompt: string
-    artifact: DashboardArtifactV1; model: string; created_at: Date; current_revision_id: string | null
-    source_snapshot_id: string | null; object_prefix: string | null; snapshot_date: string | null; source_kind: RevisionSourceKind
-  }>(`
-    SELECT r.dashboard_id, d.content_path, r.id AS revision_id, r.revision_number,
-      r.parent_revision_id, r.restored_from_revision_id, r.prompt, r.artifact, r.model,
-      r.created_at, d.current_revision_id, r.source_kind, q.source_snapshot_id, s.object_prefix, s.snapshot_date::text
-    FROM dashboard_revisions r JOIN dashboards d ON d.id = r.dashboard_id
-    LEFT JOIN LATERAL (
-      SELECT source_snapshot_id FROM query_result_snapshots WHERE revision_id = r.id ORDER BY created_at DESC LIMIT 1
-    ) q ON true LEFT JOIN data_snapshots s ON s.id = q.source_snapshot_id
-    ORDER BY r.created_at, r.dashboard_id, r.revision_number
-  `)
-  return result.rows.map((row) => ({
-    dashboardId: row.dashboard_id,
-    contentPath: row.content_path,
-    revisionId: row.revision_id,
-    revisionNumber: row.revision_number,
-    parentRevisionId: row.parent_revision_id,
-    restoredFromRevisionId: row.restored_from_revision_id,
-    prompt: row.prompt,
-    artifact: row.artifact,
-    model: row.model,
-    createdAt: row.created_at.toISOString(),
-    currentRevisionId: row.current_revision_id,
-    sourceKind: row.source_kind,
-    sourceSnapshot: row.source_snapshot_id && row.object_prefix && row.snapshot_date ? { id: row.source_snapshot_id, objectPrefix: row.object_prefix, snapshotDate: row.snapshot_date } : null,
-  }))
-}
-
-export async function backfillBootstrapRevision(input: {
-  dashboardId: string
-  contentPath: string
-  revisionId: string
+  note: string
+  model: string
+  generatedAt: string
+  artifact: DashboardArtifactV1
+  artifactHash: string
   commitSha: string
   treeSha: string
-  artifactHash: string
-  sourceKind: RevisionSourceKind
+  isHead: boolean
+}
+
+export async function dashboardExists(dashboardId: string): Promise<boolean> {
+  const result = await pool.query('SELECT 1 FROM dashboards WHERE id = $1', [dashboardId])
+  return Boolean(result.rows[0])
+}
+
+export async function applyContentIndex(input: {
+  head: string
+  /**
+   * What to record as last_indexed_head. Pass null to leave it where it was, which keeps the
+   * repository reported as unindexed so the next pass retries the same range instead of
+   * declaring an incomplete projection current.
+   */
+  indexedHead: string | null
+  mode: 'full' | 'incremental'
+  headPaths: string[]
+  revisions: IndexedRevisionRecord[]
+  readiness: string
+  error: string | null
 }): Promise<void> {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    await client.query(`UPDATE dashboards SET content_path = $2 WHERE id = $1`, [input.dashboardId, input.contentPath])
+    await pruneMissingDashboards(client, input.headPaths, input.mode)
+    const ordered = [...input.revisions].sort((left, right) => {
+      const dashboard = left.dashboardId.localeCompare(right.dashboardId)
+      return dashboard !== 0 ? dashboard : left.revisionNumber - right.revisionNumber
+    })
+    const dashboardIds = [...new Set(ordered.map((item) => item.dashboardId))]
+    const keepRevisionIds = [...new Set(ordered.map((item) => item.revisionId))]
+    if (input.mode === 'full') {
+      await replaceOccupyingDashboards(client, input.headPaths, dashboardIds)
+    }
+    if (input.mode === 'full' && dashboardIds.length) {
+      await client.query(`UPDATE dashboards SET current_revision_id = NULL WHERE id = ANY($1::uuid[])`, [dashboardIds])
+      await client.query(`
+        DELETE FROM dashboard_revisions
+        WHERE dashboard_id = ANY($1::uuid[]) AND NOT (id = ANY($2::uuid[]))
+      `, [dashboardIds, keepRevisionIds])
+    }
+    for (const revision of ordered) {
+      const slug = revision.contentPath.slice('dashboards/'.length)
+      const parentRevisionId = await livingRevisionId(client, revision.parentRevisionId, keepRevisionIds)
+      const restoredFromRevisionId = await livingRevisionId(client, revision.restoredFromRevisionId, keepRevisionIds)
+      await client.query(`
+        INSERT INTO dashboards(id, slug, title, summary, content_path)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (id) DO UPDATE SET
+          slug = EXCLUDED.slug, title = EXCLUDED.title, summary = EXCLUDED.summary,
+          content_path = EXCLUDED.content_path, updated_at = now()
+      `, [revision.dashboardId, slug, revision.artifact.title, revision.artifact.summary, revision.contentPath])
+      await client.query(`
+        INSERT INTO dashboard_revisions(
+          id, dashboard_id, revision_number, parent_revision_id, restored_from_revision_id,
+          prompt, artifact, model, publication_status, source_kind,
+          git_commit_sha, git_tree_sha, artifact_hash, published_at, publication_error
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'published', $9, $10, $11, $12, $13::timestamptz, NULL)
+        ON CONFLICT (id) DO UPDATE SET
+          dashboard_id = EXCLUDED.dashboard_id,
+          revision_number = EXCLUDED.revision_number,
+          parent_revision_id = EXCLUDED.parent_revision_id,
+          restored_from_revision_id = EXCLUDED.restored_from_revision_id,
+          prompt = EXCLUDED.prompt,
+          artifact = EXCLUDED.artifact,
+          model = EXCLUDED.model,
+          publication_status = 'published',
+          source_kind = EXCLUDED.source_kind,
+          git_commit_sha = EXCLUDED.git_commit_sha,
+          git_tree_sha = EXCLUDED.git_tree_sha,
+          artifact_hash = EXCLUDED.artifact_hash,
+          published_at = COALESCE(dashboard_revisions.published_at, EXCLUDED.published_at),
+          publication_error = NULL
+      `, [
+        revision.revisionId, revision.dashboardId, revision.revisionNumber,
+        parentRevisionId, restoredFromRevisionId, revision.note,
+        JSON.stringify(revision.artifact), revision.model, revision.sourceKind,
+        revision.commitSha, revision.treeSha, revision.artifactHash, revision.generatedAt,
+      ])
+    }
+    for (const revision of ordered.filter((item) => item.isHead)) {
+      await client.query(`
+        UPDATE dashboards SET current_revision_id = $2, title = $3, summary = $4, content_path = $5, updated_at = now()
+        WHERE id = $1
+      `, [revision.dashboardId, revision.revisionId, revision.artifact.title, revision.artifact.summary, revision.contentPath])
+    }
     await client.query(`
-      UPDATE dashboard_revisions SET publication_status = 'published', source_kind = $5,
-        git_commit_sha = $2, git_tree_sha = $3, artifact_hash = $4,
-        published_at = COALESCE(published_at, created_at), publication_error = NULL WHERE id = $1
-    `, [input.revisionId, input.commitSha, input.treeSha, input.artifactHash, input.sourceKind])
+      UPDATE content_repository_state SET current_head = $1,
+        last_indexed_head = COALESCE($2, last_indexed_head),
+        readiness_state = $3, activated = true,
+        last_successful_scan = CASE WHEN $4::text IS NULL THEN now() ELSE last_successful_scan END,
+        last_error = $4, updated_at = now()
+      WHERE singleton
+    `, [input.head, input.indexedHead, input.readiness, input.error])
     await client.query('COMMIT')
   } catch (error) {
     await client.query('ROLLBACK')
@@ -597,6 +642,103 @@ export async function backfillBootstrapRevision(input: {
   } finally {
     client.release()
   }
+}
+
+async function replaceOccupyingDashboards(
+  client: { query: typeof pool.query },
+  headPaths: string[],
+  incomingDashboardIds: string[],
+): Promise<void> {
+  await client.query(`
+    UPDATE generation_runs SET dashboard_id = NULL, revision_id = NULL, base_revision_id = NULL
+    WHERE dashboard_id IN (
+      SELECT id FROM dashboards
+      WHERE content_path = ANY($1::text[])
+        AND (cardinality($2::uuid[]) = 0 OR NOT (id = ANY($2::uuid[])))
+    )
+  `, [headPaths, incomingDashboardIds])
+  await client.query(`
+    UPDATE dashboards SET current_revision_id = NULL
+    WHERE content_path = ANY($1::text[])
+      AND (cardinality($2::uuid[]) = 0 OR NOT (id = ANY($2::uuid[])))
+  `, [headPaths, incomingDashboardIds])
+  await client.query(`
+    DELETE FROM dashboards
+    WHERE content_path = ANY($1::text[])
+      AND (cardinality($2::uuid[]) = 0 OR NOT (id = ANY($2::uuid[])))
+  `, [headPaths, incomingDashboardIds])
+}
+
+async function livingRevisionId(
+  client: { query: typeof pool.query },
+  revisionId: string | null,
+  keepRevisionIds: string[],
+): Promise<string | null> {
+  if (!revisionId) return null
+  if (keepRevisionIds.includes(revisionId)) return revisionId
+  const result = await client.query('SELECT 1 FROM dashboard_revisions WHERE id = $1', [revisionId])
+  return result.rows[0] ? revisionId : null
+}
+
+async function pruneMissingDashboards(
+  client: { query: typeof pool.query },
+  headPaths: string[],
+  mode: 'full' | 'incremental',
+): Promise<void> {
+  const pendingGuard = mode === 'full' ? '' : `
+      AND NOT EXISTS (
+        SELECT 1 FROM dashboard_revisions r
+        WHERE r.dashboard_id = d.id AND r.publication_status = 'pending'
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM content_publications p
+        WHERE p.dashboard_id = d.id AND p.status IN ('prepared', 'publishing', 'committed', 'blocked')
+      )`
+  await client.query(`
+    UPDATE generation_runs SET dashboard_id = NULL, revision_id = NULL, base_revision_id = NULL
+    WHERE dashboard_id IN (
+      SELECT d.id FROM dashboards d
+      WHERE (d.content_path IS NULL OR NOT (d.content_path = ANY($1::text[])))
+      ${pendingGuard}
+    )
+  `, [headPaths])
+  await client.query(`
+    UPDATE dashboards d SET current_revision_id = NULL
+    WHERE (d.content_path IS NULL OR NOT (d.content_path = ANY($1::text[])))
+    ${pendingGuard}
+  `, [headPaths])
+  await client.query(`
+    DELETE FROM dashboards d
+    WHERE (d.content_path IS NULL OR NOT (d.content_path = ANY($1::text[])))
+    ${pendingGuard}
+  `, [headPaths])
+}
+
+export async function listHeadRevisionsMissingSummaries(): Promise<Array<{
+  dashboardId: string
+  revisionId: string
+  artifact: DashboardArtifactV1
+}>> {
+  const result = await pool.query<{ dashboard_id: string; revision_id: string; artifact: DashboardArtifactV1; dataset_count: number; summary_count: number }>(`
+    SELECT d.id AS dashboard_id, r.id AS revision_id, r.artifact,
+      jsonb_array_length(r.artifact->'datasets') AS dataset_count,
+      (
+        SELECT count(DISTINCT q.dataset_id)::int FROM query_result_snapshots q WHERE q.revision_id = r.id
+      ) AS summary_count
+    FROM dashboards d
+    JOIN dashboard_revisions r ON r.id = d.current_revision_id
+    WHERE r.publication_status = 'published'
+  `)
+  return result.rows
+    .filter((row) => row.summary_count < row.dataset_count)
+    .map((row) => ({ dashboardId: row.dashboard_id, revisionId: row.revision_id, artifact: row.artifact }))
+}
+
+export async function revisionHasSummaries(revisionId: string): Promise<boolean> {
+  const result = await pool.query<{ present: boolean }>(`
+    SELECT EXISTS (SELECT 1 FROM query_result_snapshots WHERE revision_id = $1) AS present
+  `, [revisionId])
+  return Boolean(result.rows[0]?.present)
 }
 
 export async function createValidationRun(input: { expectedHead: string | null; fingerprint: string; affectedDashboards: string[] }): Promise<string> {

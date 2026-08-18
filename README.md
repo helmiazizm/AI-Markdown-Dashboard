@@ -27,6 +27,7 @@ auto_dashboard_poc/
 - DuckDB Node Neo grain catalogs, plus DuckDB summary writes and reads
 - MinIO Hive-partitioned summary Parquet
 - Local Git-canonical Markdown, SQL, JSON, and bounded JavaScript bundles
+- Content-indexer sidecar that projects Git into PostgreSQL
 - One stateless Cline SDK agent through OpenRouter in live mode
 
 ## Start locally
@@ -39,7 +40,7 @@ make purge
 make setup
 ```
 
-`make purge` stops Compose, deletes named volumes, warehouse files, cached downloads, and `fieldboard_content/`. It does not delete `.env`. `make setup` installs dependencies, bootstraps an empty Git content repository, downloads the public Hugging Face fashion catalog and TLC Q1 2026 Parquet, loads `data/warehouse/*.duckdb` on the host, then starts the stack and waits until warehouse, MinIO, and the content repository are ready with a populated catalog.
+`make purge` stops Compose, deletes named volumes, warehouse files, cached downloads, and `fieldboard_content/`. It does not delete `.env`. `make reset-index` wipes only the Postgres and MinIO volumes, then starts the stack again so the content indexer can rebuild the control-plane projection from the existing Git content repository. `make setup` installs dependencies, initializes an empty Git content repository when one is not already present, downloads the public Hugging Face fashion catalog and TLC Q1 2026 Parquet, loads `data/warehouse/*.duckdb` on the host, then starts the stack and waits until warehouse, MinIO, and the content indexer are ready with a populated catalog.
 
 `make down` stops containers without deleting data. Reload grain with `make data-load-fashion-catalog` and `make data-load-tlc-yellow`, then `make data-init`.
 
@@ -134,7 +135,7 @@ dashboards/revenue-operations--ccf25439/
   widgets/revenue-by-region.echarts.json
 ```
 
-Git `main` is canonical; PostgreSQL is the control-plane projection. Every revision is pinned to a commit and artifact hash. External edits are reviewed at <http://localhost:5173/repository>, fingerprinted, security-validated, and rerun against the warehouse before import. Fieldboard never fetches, pulls, pushes, resets, stashes, merges, or rewrites history.
+Git `main` is canonical; PostgreSQL is a rebuildable projection. A `content-indexer` sidecar parses each `dashboards/*` bundle from Git (Airflow-style DAG parsing) and upserts dashboard/revision rows. Wiping Postgres and pointing at the same content clone is enough: the indexer fills the projection with no activation ritual. Every revision is pinned to a commit and artifact hash. External **working-tree** edits are reviewed at <http://localhost:5173/repository>, fingerprinted, security-validated, and rerun against the warehouse before import. Committed history is never imported through that UI; the indexer adopts it as-is. Fieldboard never fetches, pulls, pushes, resets, stashes, merges, or rewrites history.
 
 Analytics SQL is restricted to one DuckDB `SELECT`/`WITH` statement over registered `project.schema.table` relations and local CTEs. JOINs among those triples are allowed. Mutations, DDL, pragmas, extensions, URLs, file functions, system catalogs, `source_data`, multiple statements, responses above 500 rows or 2 MB, and queries beyond `QUERY_TIMEOUT_MS` (maximum 120 seconds) are rejected. The bundled TLC grain needs that 120-second maximum for aggregations.
 
@@ -151,8 +152,13 @@ Live source reconciliation and OpenRouter checks remain opt-in:
 
 ```sh
 RUN_DATA_INTEGRATION=1 npm run test -w @fieldboard/api
+RUN_PROJECTION_TESTS=1 npm run test -w @fieldboard/api
 RUN_OPENROUTER_SMOKE=1 AGENT_MODE=cline OPENROUTER_API_KEY=... npm run test -w @fieldboard/api
 ```
+
+`RUN_PROJECTION_TESTS` covers the Git-to-PostgreSQL projection. It creates and drops its own
+`fieldboard_projection_test` database, because a full-mode reindex asserts the exact set of
+projected dashboards and would otherwise rewrite the local projection.
 
 ## API
 

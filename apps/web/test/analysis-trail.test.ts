@@ -96,3 +96,63 @@ describe('trail phase grouping', () => {
     expect(wrapper.findAll('.trail-phase')).toHaveLength(1)
   })
 })
+
+const revisionEvents = [
+  {
+    id: 1,
+    type: 'planning' as const,
+    message: 'Planning revision 3 against the published dashboard.',
+    createdAt: 'now',
+    payload: {
+      kind: 'revision_context',
+      baseRevisionNumber: 2,
+      priorPrompts: 'Revision 1 was requested with: Summarize Q1\nRevision 2 was a hand edit imported from Git, noted as: Fixed a typo',
+      datasetCount: 4,
+      widgetCount: 4,
+    },
+  },
+  {
+    id: 2,
+    type: 'planning' as const,
+    message: 'Carrying over 3 items, changing 1, adding 1, removing 0.',
+    createdAt: 'now',
+    payload: {
+      kind: 'crew_change_plan',
+      kept: ['monthly_run_rate', 'borough_breakdown'],
+      modified: ['hourly_demand_profile'],
+      added: ['weekday_volume'],
+      removed: [],
+      narrativeChanges: 'The hourly section gets a new lede.',
+    },
+  },
+]
+
+describe('revision trail', () => {
+  it('shows the base revision and the prior request trail with its line breaks intact', () => {
+    const wrapper = mount(AnalysisTrail, { props: { events: revisionEvents, detailed: true } })
+
+    expect(wrapper.text()).toContain('revision 2 is the base')
+    expect(wrapper.text()).toContain('Revision 1 was requested with: Summarize Q1')
+    expect(wrapper.text()).toContain('hand edit imported from Git')
+    expect(wrapper.find('.trail-prompt-trail').exists()).toBe(true)
+  })
+
+  it('names what the crew carried over rather than only counting it', () => {
+    const wrapper = mount(AnalysisTrail, { props: { events: revisionEvents, detailed: true } })
+
+    const tags = wrapper.findAll('.trail-tags').map((node) => node.text())
+    expect(tags.join(' ')).toContain('keeping monthly_run_rate, borough_breakdown')
+    expect(tags.join(' ')).toContain('changing hourly_demand_profile')
+    expect(tags.join(' ')).toContain('adding weekday_volume')
+    // Nothing was removed, so no removal chip is drawn even though the summary line counts it.
+    expect(tags.join(' ')).not.toContain('removing')
+    expect(wrapper.text()).toContain('The hourly section gets a new lede.')
+  })
+
+  it('hides the revision detail in standard mode', () => {
+    const wrapper = mount(AnalysisTrail, { props: { events: revisionEvents, detailed: false } })
+
+    expect(wrapper.find('.trail-detail').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Planning revision 3')
+  })
+})

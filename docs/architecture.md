@@ -16,10 +16,12 @@ flowchart LR
   Validate --> Pending["PostgreSQL · pending revision + summary pointers"]
   Pending --> Publisher["Trusted content publisher"]
   Publisher --> Git["Local Git main · canonical bundle commit"]
-  Git --> Store["PostgreSQL · published JSONB projection pinned to SHA"]
+  Git --> Indexer["content-indexer sidecar"]
+  Indexer --> Store["PostgreSQL · published JSONB projection pinned to SHA"]
   Editor["External editor or authoring skill"] --> Git
-  Git --> Sync["Repository sync center · diff, validate, import"]
+  Git --> Sync["Repository sync center · dirty worktree validate/import"]
   Sync --> Validate
+  Indexer --> Minio
   Store --> API["GET dashboard hydrates JSON"]
   Vue["Vue Markdown document runtime"] --> API
   API --> DuckRead["DuckDB read_parquet"]
@@ -29,7 +31,7 @@ flowchart LR
   Vue --> D3["Sandboxed D3 iframe"]
 ```
 
-The data plane is two replaceable adapters. DuckDB is the grain store and the transformation engine: persistent per-project `.duckdb` files are attached as catalogs, authoring SQL runs there, accepted datasets are `COPY`'d to MinIO as Hive-partitioned summary Parquet, and dashboard GET hydrates those files with DuckDB `read_parquet`. Application PostgreSQL is the control plane: warehouse relation registry, revision records, Git publication state, run events, and pointers to summary prefixes. It does not store summary row payloads. Agents never receive warehouse or object-store credentials.
+The data plane is two replaceable adapters. DuckDB is the grain store and the transformation engine: persistent per-project `.duckdb` files are attached as catalogs, authoring SQL runs there, accepted datasets are `COPY`'d to MinIO as Hive-partitioned summary Parquet, and dashboard GET hydrates those files with DuckDB `read_parquet`. Application PostgreSQL is the control plane: warehouse relation registry, a rebuildable Git projection, publication state, run events, and pointers to summary prefixes. It does not store summary row payloads. Agents never receive warehouse or object-store credentials.
 
 Governed names are `project.schema.table` triples registered in `warehouse_relations`. The bundled demo seeds `fashion.catalog.products` and `tlc.taxi.yellow_trips`; those can be replaced. JOINs among registered triples are allowed. There is no `source_data` compatibility view.
 
@@ -45,9 +47,11 @@ Exploration queries return ephemeral JSON and do not write that prefix. Dashboar
 
 Generation events are persisted before being sent over SSE, so a reconnect can resume from `Last-Event-ID`. The UI exposes stage summaries only; model reasoning and raw provider events are never streamed.
 
-A refinement first creates a pending complete artifact whose parent is the locked base revision. The trusted publisher acquires a process and PostgreSQL advisory lock, rechecks Git HEAD, branch, fingerprint, current dashboard base, bundle hash, and round-trip equality, then stages and commits only the stable dashboard path. Only after the commit exists does PostgreSQL mark the revision published/current. A commit-before-projection crash is recovered through the revision UUID trailer. Dirty or changed Git state retains the pending artifact as `publication_blocked`.
+A refinement first creates a pending complete artifact whose parent is the locked base revision. The trusted publisher acquires a process and PostgreSQL advisory lock, rechecks Git HEAD, branch, fingerprint, current dashboard base, bundle hash, and round-trip equality, then stages and commits only the stable dashboard path. Only after the commit exists does PostgreSQL mark the revision published/current. A commit-before-projection crash is recovered by the content indexer, which upserts from Git trailers and `provenance.json` without rewriting history. Dirty or changed Git state retains the pending artifact as `publication_blocked`.
 
-Restore verifies the source revision's recorded commit tree and artifact hash, copies its summary pointers into a new pending revision, and publishes a new commit. Neither Git nor PostgreSQL history is rewritten.
+The content indexer treats Git as source of truth. If PostgreSQL is empty or `last_indexed_head` is not in this repository, it rebuilds the dashboard projection from committed `dashboards/*` history and rematerializes HEAD summaries. `make reset-index` is the supported way to start anew with an existing content clone.
+
+Restore verifies the source revision's recorded commit tree and artifact hash, rematerializes summaries when the cache was wiped, copies those pointers into a new pending revision, and publishes a new commit. Neither Git nor PostgreSQL history is rewritten.
 
 The bundle loader accepts only UTF-8/LF regular files with final newlines, fixed relative sidecar paths, matching IDs, and bounded total size. It rejects symlinks, traversal, unknown files, duplicate IDs, unsafe Markdown, ECharts resources/prototype keys, blocked D3 capabilities, and SQL outside the read-only `project.schema.table` allowlist. Manual changes additionally receive an expiring validation token bound to the complete repository fingerprint and fresh final-query results.
 

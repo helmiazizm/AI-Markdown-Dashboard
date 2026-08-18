@@ -12,6 +12,7 @@ import type { QueryExecutionResult } from '../data/query-service.js'
 import { readSummary, writeSummary } from '../data/summary-store.js'
 import { createId } from '../lib/ids.js'
 import { pool } from './pool.js'
+import { ensureRevisionSummaries } from '../content/summaries.js'
 
 export async function createGenerationRun(input: {
   mode: 'create' | 'refine'
@@ -213,10 +214,19 @@ export async function getDashboardDetail(dashboardId: string, revisionId?: strin
   `, [selectedRevisionId, dashboardId])
   const selected = revision.rows[0]
   if (!selected) return null
-  const [results, revisions] = await Promise.all([
+  const [initialResults, revisions] = await Promise.all([
     getLatestResults(selectedRevisionId),
     listRevisions(dashboardId),
   ])
+  let results = initialResults
+  if (!results.length && selected.publication_status === 'published') {
+    try {
+      await ensureRevisionSummaries({ dashboardId, revisionId: selectedRevisionId, artifact: selected.artifact })
+      results = await getLatestResults(selectedRevisionId)
+    } catch {
+      // Metadata remains readable while warehouse rematerialization is unavailable.
+    }
+  }
   return {
     id: dashboardId,
     currentRevisionId,

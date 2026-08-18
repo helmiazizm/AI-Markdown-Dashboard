@@ -9,7 +9,7 @@ Use ECharts for bars, lines, areas, scatter plots, heatmaps, treemaps, pies, gau
 Write JSON-only native ECharts options. Fieldboard injects `dataset.source` from the materialized summary table, plus dimensions, palette, typography, background, accessibility, and responsive rendering.
 
 - Use `series[].encode` with SQL output column names.
-- Omit `data`, `source`, functions, executable formatters, prototype keys, and external URLs.
+- Omit rows of your own — `dataset`, `series[].data`, axis `data`, any `source` — along with functions, executable formatters, prototype keys, and external URLs. `legend.data` is allowed, because it names series rather than carrying rows.
 - Label the measure axis with its metric and unit. Do not `name` a category axis whose own labels already say what they are — at `nameLocation: middle` that name is drawn rotated across the axis, where it collides with the labels.
 - Round every measure to its display precision in SQL. An unrounded `AVG` reaches the tooltip with full floating-point precision.
 - Prefer horizontal bars for long category labels and sorted rankings.

@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AnalysisTrail from '../components/AnalysisTrail.vue'
 import DashboardDocument from '../components/DashboardDocument.vue'
+import ModalDialog from '../components/ModalDialog.vue'
 import { api, followGeneration } from '../lib/api.js'
 
 const route = useRoute()
@@ -14,9 +15,14 @@ const working = ref(false)
 const historyOpen = ref(false)
 const prompt = ref('')
 const events = ref<GenerationEvent[]>([])
-const detailedTrail = ref(false)
+const trailOpen = ref(false)
 const error = ref('')
 let stopFollowing: (() => void) | undefined
+
+const latestEvent = computed(() => events.value[events.value.length - 1])
+const statusLine = computed(() => latestEvent.value?.message ?? 'Assembling the analysis crew…')
+const statusStage = computed(() => latestEvent.value?.type.replace('_', ' ') ?? 'queued')
+const runVisible = computed(() => working.value || events.value.length > 0)
 
 const dashboardId = computed(() => String(route.params.id))
 const isHistorical = computed(() => detail.value && detail.value.revision.id !== detail.value.currentRevisionId)
@@ -39,11 +45,12 @@ async function load(): Promise<void> {
 
 async function refine(): Promise<void> {
   if (!detail.value || working.value || prompt.value.trim().length < 5 || isHistorical.value) return
+  stopFollowing?.()
   working.value = true
   events.value = []
   error.value = ''
   try {
-    const run = await api.refine(dashboardId.value, prompt.value.trim(), detail.value.currentRevisionId, detailedTrail.value ? 'detailed' : 'standard')
+    const run = await api.refine(dashboardId.value, prompt.value.trim(), detail.value.currentRevisionId, 'detailed')
     stopFollowing = followGeneration(run.id, (event) => {
       if (!events.value.some((existing) => existing.id === event.id)) events.value.push(event)
     }, async (status) => {
@@ -164,19 +171,29 @@ function formatDate(value: string): string {
       <section v-if="!isHistorical" class="refinement-panel">
         <div class="refinement-label"><span class="eyebrow signal-text">Continue the analysis</span><h2>What should change?</h2></div>
         <div>
-          <textarea v-model="prompt" rows="3" maxlength="4000" placeholder="Add a market-level view, focus the narrative on running products, or replace the price chart…" @keydown.meta.enter="refine" @keydown.ctrl.enter="refine"></textarea>
-          <label class="analysis-option">
-            <input v-model="detailedTrail" type="checkbox" :disabled="working" />
-            <span>
-              <strong>Show detailed analysis trail</strong>
-              <small>Each role's questions, DuckDB SQL, result shape, and validation checks—not private reasoning.</small>
-            </span>
-          </label>
+          <textarea v-model="prompt" rows="3" maxlength="4000" placeholder="Add a market-level view, focus the narrative on running products, or replace the price chart…" :disabled="working" @keydown.meta.enter="refine" @keydown.ctrl.enter="refine"></textarea>
           <div class="composer-actions"><span>Creates immutable revision {{ detail.revision.revisionNumber + 1 }}</span><button class="signal-button" :disabled="working || prompt.trim().length < 5" @click="refine">Refine fieldboard ↗</button></div>
           <p v-if="error" class="error-message" role="alert">{{ error }}</p>
-          <AnalysisTrail v-if="events.length" :events="events" :active="working" :detailed="detailedTrail" />
+          <div v-if="runVisible" class="run-status" :class="{ 'is-live': working }">
+            <span class="run-status-mark" aria-hidden="true"></span>
+            <p class="run-status-line" role="status">
+              <span class="run-status-stage">{{ statusStage }}</span>{{ statusLine }}
+            </p>
+            <button class="text-button" :disabled="!events.length" @click="trailOpen = true">
+              View analysis trail · {{ events.length }}
+            </button>
+          </div>
         </div>
       </section>
+
+      <ModalDialog
+        :open="trailOpen"
+        title="Analysis trail"
+        description="Each role's questions, DuckDB SQL, result shape, and validation checks—not private reasoning."
+        @close="trailOpen = false"
+      >
+        <AnalysisTrail v-if="events.length" :events="events" :active="working" :detailed="true" />
+      </ModalDialog>
     </template>
   </div>
 </template>

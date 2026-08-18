@@ -99,6 +99,15 @@ export function assertDashboardContentPath(contentPath: string, dashboardId?: st
   }
 }
 
+export function isDashboardContentPath(contentPath: string, dashboardId?: string): boolean {
+  try {
+    assertDashboardContentPath(contentPath, dashboardId)
+    return true
+  } catch {
+    return false
+  }
+}
+
 export function serializeBundle(artifactInput: DashboardArtifactV1, metadata: BundleMetadata): SerializedBundle {
   assertDashboardContentPath(metadata.contentPath, metadata.dashboardId)
   const artifact = canonicalizeDashboardArtifact(artifactInput)
@@ -181,15 +190,10 @@ async function listBundleFiles(bundlePath: string): Promise<string[]> {
   return output.sort()
 }
 
-async function boundedText(bundlePath: string, relativePath: string, budget: { bytes: number }): Promise<string> {
+function decodeBundleText(relativePath: string, bytes: Uint8Array, budget: { bytes: number }): string {
   safeSidecarPath(relativePath)
-  const absolute = path.resolve(bundlePath, relativePath)
-  if (!absolute.startsWith(`${path.resolve(bundlePath)}${path.sep}`)) throw new Error('Bundle path escaped its dashboard directory')
-  const stat = await lstat(absolute)
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`Bundle sidecar is not a regular file: ${relativePath}`)
-  budget.bytes += stat.size
+  budget.bytes += bytes.byteLength
   if (budget.bytes > MAX_BUNDLE_BYTES) throw new Error('Dashboard bundle exceeds 512 KB')
-  const bytes = await readFile(absolute)
   let value: string
   try {
     value = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
@@ -202,26 +206,31 @@ async function boundedText(bundlePath: string, relativePath: string, budget: { b
   return value
 }
 
-export async function loadBundle(repositoryRoot: string, contentPath: string): Promise<LoadedBundle> {
+export function loadBundleFromFiles(contentPath: string, files: Map<string, string>): LoadedBundle {
   assertDashboardContentPath(contentPath)
-  const root = await realpath(repositoryRoot)
-  const requestedPath = path.join(root, contentPath)
-  const requestedStat = await lstat(requestedPath)
-  if (requestedStat.isSymbolicLink()) throw new Error('Dashboard bundle directories may not be symlinks')
-  const bundlePath = await realpath(requestedPath)
-  if (!bundlePath.startsWith(`${root}${path.sep}`)) throw new Error('Dashboard bundle resolves outside the content repository')
-  const files = await listBundleFiles(bundlePath)
+  const names = [...files.keys()].sort()
   const budget = { bytes: 0 }
-  const manifest = fieldboardManifestSchema.parse(JSON.parse(await boundedText(bundlePath, 'fieldboard.json', budget)))
+  const decoded = new Map<string, string>()
+  for (const relativePath of names) {
+    const value = files.get(relativePath)
+    if (value === undefined) continue
+    decoded.set(relativePath, decodeBundleText(relativePath, Buffer.from(value, 'utf8'), budget))
+  }
+  const read = (relativePath: string): string => {
+    const value = decoded.get(relativePath)
+    if (value === undefined) throw new Error(`Missing bundle files: ${relativePath}`)
+    return value
+  }
+  const manifest = fieldboardManifestSchema.parse(JSON.parse(read('fieldboard.json')))
   assertDashboardContentPath(contentPath, manifest.dashboardId)
-  const provenance = fieldboardProvenanceSchema.parse(JSON.parse(await boundedText(bundlePath, 'provenance.json', budget)))
-  const markdown = await boundedText(bundlePath, 'dashboard.md', budget)
+  const provenance = fieldboardProvenanceSchema.parse(JSON.parse(read('provenance.json')))
+  const markdown = read('dashboard.md')
   const expected = new Set(['dashboard.md', 'fieldboard.json', 'provenance.json'])
   const datasets = []
   for (const dataset of manifest.datasets) {
     if (!SAFE_ID.test(dataset.id) || dataset.sqlFile !== `queries/${dataset.id}.sql`) throw new Error(`Dataset sidecar does not match id: ${dataset.id}`)
     expected.add(dataset.sqlFile)
-    const sql = await boundedText(bundlePath, dataset.sqlFile, budget)
+    const sql = read(dataset.sqlFile)
     normalizeReadonlySql(sql)
     datasets.push({ id: dataset.id, question: dataset.question, sql, expectedColumns: dataset.expectedColumns, maxRows: dataset.maxRows })
   }
@@ -231,14 +240,14 @@ export async function loadBundle(repositoryRoot: string, contentPath: string): P
       ? `widgets/${widget.id}.echarts.json`
       : `widgets/${widget.id}.d3.js`
     if (!SAFE_ID.test(widget.id) || widget.sourceFile !== expectedFile) throw new Error(`Widget sidecar does not match id: ${widget.id}`)
-    expected.add(widget.sourceFile)
-    const source = await boundedText(bundlePath, widget.sourceFile, budget)
+    expected.add(expectedFile)
+    const source = read(widget.sourceFile)
     widgets.push(widget.engine === 'echarts'
       ? { ...widget, option: JSON.parse(source), sourceFile: undefined }
       : { ...widget, script: source, sourceFile: undefined })
   }
-  const unknown = files.filter((file) => !expected.has(file))
-  const missing = [...expected].filter((file) => !files.includes(file))
+  const unknown = names.filter((file) => !expected.has(file))
+  const missing = [...expected].filter((file) => !names.includes(file))
   if (unknown.length) throw new Error(`Unsupported bundle files: ${unknown.join(', ')}`)
   if (missing.length) throw new Error(`Missing bundle files: ${missing.join(', ')}`)
   const artifact = validateDashboardArtifact({
@@ -250,6 +259,32 @@ export async function loadBundle(repositoryRoot: string, contentPath: string): P
     widgets: widgets.map(({ sourceFile: _sourceFile, ...widget }) => widget),
   })
   return { contentPath, artifact, manifest, provenance, artifactHash: artifactSha256(artifact) }
+}
+
+export async function loadBundle(repositoryRoot: string, contentPath: string): Promise<LoadedBundle> {
+  assertDashboardContentPath(contentPath)
+  const root = await realpath(repositoryRoot)
+  const requestedPath = path.join(root, contentPath)
+  const requestedStat = await lstat(requestedPath)
+  if (requestedStat.isSymbolicLink()) throw new Error('Dashboard bundle directories may not be symlinks')
+  const bundlePath = await realpath(requestedPath)
+  if (!bundlePath.startsWith(`${root}${path.sep}`)) throw new Error('Dashboard bundle resolves outside the content repository')
+  const names = await listBundleFiles(bundlePath)
+  const files = new Map<string, string>()
+  for (const relative of names) {
+    safeSidecarPath(relative)
+    const absolute = path.resolve(bundlePath, relative)
+    if (!absolute.startsWith(`${path.resolve(bundlePath)}${path.sep}`)) throw new Error('Bundle path escaped its dashboard directory')
+    const stat = await lstat(absolute)
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`Bundle sidecar is not a regular file: ${relative}`)
+    try {
+      files.set(relative, new TextDecoder('utf-8', { fatal: true }).decode(await readFile(absolute)))
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Invalid UTF-8')) throw error
+      throw new Error(`Invalid UTF-8 in ${relative}`)
+    }
+  }
+  return loadBundleFromFiles(contentPath, files)
 }
 
 export async function writeBundleAtomically(repositoryRoot: string, bundle: SerializedBundle, contentPath: string, journalId: string): Promise<void> {

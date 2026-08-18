@@ -408,20 +408,33 @@ export function extractWidgetReferences(markdown: string): string[] {
 const unsafeOptionKeys = new Set(['__proto__', 'prototype', 'constructor'])
 const externalUrl = /(?:https?:|javascript:|data:text\/html)/i
 
-function validateOption(value: unknown, path: string, issues: string[]): void {
+/**
+ * `legend.data` is the one place ECharts uses `data` for author-owned labels rather than rows:
+ * it names the series to show in the legend. Models emit it routinely, and rejecting it costs a
+ * whole submission over a list of strings that carries no data. A legend list that holds
+ * anything other than names is still rows, and is refused with everything else.
+ */
+function isLegendLabels(value: unknown): boolean {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string'
+    || (!!entry && typeof entry === 'object' && !Array.isArray(entry) && typeof (entry as Record<string, unknown>).name === 'string'))
+}
+
+function validateOption(value: unknown, path: string, issues: string[], owner?: string): void {
   if (typeof value === 'string' && externalUrl.test(value)) {
     issues.push(`${path} contains an external or executable URL`)
     return
   }
   if (Array.isArray(value)) {
-    value.forEach((item, index) => validateOption(item, `${path}[${index}]`, issues))
+    // The owner carries through an array so legend[1].data is read as a legend key, not a bare one.
+    value.forEach((item, index) => validateOption(item, `${path}[${index}]`, issues, owner))
     return
   }
   if (!value || typeof value !== 'object') return
   for (const [key, child] of Object.entries(value)) {
     if (unsafeOptionKeys.has(key)) issues.push(`${path}.${key} is not allowed`)
-    if (key === 'data' || key === 'source') issues.push(`${path}.${key} must be supplied by the host dataset`)
-    validateOption(child, `${path}.${key}`, issues)
+    const hostOwned = key === 'source' || (key === 'data' && !(owner === 'legend' && isLegendLabels(child)))
+    if (hostOwned) issues.push(`${path}.${key} must be supplied by the host dataset`)
+    validateOption(child, `${path}.${key}`, issues, key)
   }
 }
 

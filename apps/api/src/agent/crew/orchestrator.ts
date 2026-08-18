@@ -11,15 +11,19 @@ import { normalizeReadonlySql } from '../../data/query-guard.js'
 import { executeDatasetQuery } from '../../data/query-service.js'
 import { getGovernedSourceContext } from '../../data/source-context.js'
 import type { AgentRunInput } from '../runner.js'
+import { renderPromptTrail } from '../revision-context.js'
 import {
   analysisSubmissionSchema,
   dashboardBriefSchema,
   layoutSubmissionSchema,
+  normalizeLayoutSubmission,
+  salvageLayoutSubmission,
   type AnalysisSubmission,
   type CrewRole,
   type DashboardBrief,
   type LayoutSubmission,
 } from './contracts.js'
+import { carryOverAnalysis, carryOverArtifactSql, carryOverLayout, summarizeChangePlan } from './carry-over.js'
 import { assembleArtifact } from './fallbacks.js'
 import {
   analysisSystemPrompt,
@@ -144,6 +148,21 @@ function queryTool(input: AgentRunInput, role: CrewRole, budget: number, state: 
   }
 }
 
+/** What a submit tool captured: the accepted submission, or the best of a rejected one. */
+export interface SubmissionSlot<T> {
+  value?: T
+  /** Whatever survived validation of a rejected payload, used only if the role never recovers. */
+  salvaged?: T
+  error?: string
+}
+
+interface SubmitOptions<T> {
+  /** Translates known near-miss shapes into the contract before validation. */
+  normalize?: (payload: unknown) => unknown
+  /** Keeps the usable part of a payload that still failed, rather than losing all of it. */
+  salvage?: (payload: unknown) => T | undefined
+}
+
 /**
  * Builds a submit tool that captures a schema-validated payload into `slot`. Validation errors
  * are returned to the role for correction, mirroring how submit_dashboard already behaves.
@@ -152,17 +171,19 @@ function submitTool<T>(
   name: string,
   description: string,
   schema: z.ZodType<T>,
-  slot: { value?: T; error?: string },
+  slot: SubmissionSlot<T>,
   onAccepted: (value: T) => Promise<void>,
+  options: SubmitOptions<T> = {},
 ): RoleTool {
   return {
     name,
     description,
     inputSchema: schema,
     execute: async (payload: never) => {
-      const parsed = schema.safeParse(payload)
+      const parsed = schema.safeParse(options.normalize ? options.normalize(payload) : payload)
       if (!parsed.success) {
         slot.value = undefined
+        slot.salvaged = options.salvage?.(payload) ?? slot.salvaged
         slot.error = parsed.error.issues.map((issue) => `${issue.path.join('.') || 'root'}: ${issue.message}`).join('; ')
         return { output: { accepted: false, error: slot.error }, isError: true }
       }
@@ -185,20 +206,39 @@ export async function runCrewPipeline(
 ): Promise<{ artifact: DashboardArtifactV1; usage: Record<string, unknown> }> {
   const config = getConfig()
   const usageByRole: Record<string, unknown> = {}
+  const revision = input.revisionContext
 
-  // 1. Planner: produces the contract both parallel roles are bound to.
-  await input.onStage('planning', 'Planning the analysis and the document layout.')
-  const briefSlot: { value?: DashboardBrief; error?: string } = {}
+  // 1. Planner: produces the contract both parallel roles are bound to. On a revision that
+  //    contract also says what to carry over, which is what keeps the crew from rebuilding.
+  if (revision) {
+    await input.onStage('planning', `Planning revision ${revision.baseRevisionNumber + 1} against the published dashboard.`, input.detailLevel === 'detailed'
+      ? {
+          kind: 'revision_context',
+          baseRevisionNumber: revision.baseRevisionNumber,
+          priorPrompts: renderPromptTrail(revision),
+          datasetCount: revision.baseArtifact.datasets.length,
+          widgetCount: revision.baseArtifact.widgets.length,
+        }
+      : undefined)
+  } else {
+    await input.onStage('planning', 'Planning the analysis and the document layout.')
+  }
+  const briefSlot: SubmissionSlot<DashboardBrief> = {}
   const plannerResult = await options.runRole({
     role: 'planner',
     modelId: roleModel('planner'),
     systemPrompt: plannerSystemPrompt,
-    prompt: buildPlannerPrompt(input),
+    prompt: buildPlannerPrompt({ prompt: input.prompt, revision }),
     tools: [
       sourceContextTool(input, 'planner'),
       submitTool('submit_plan', 'Submit the complete dashboard brief. This is the only way to finish planning.', dashboardBriefSchema, briefSlot, async (brief) => {
         await input.onStage('planning', `Plan accepted: ${brief.datasets.length} datasets and ${brief.widgets.length} widgets.`, input.detailLevel === 'detailed'
           ? { kind: 'crew_plan', title: brief.title, decisionQuestion: brief.decisionQuestion, datasets: brief.datasets, widgets: brief.widgets }
+          : undefined)
+        if (!brief.changePlan) return
+        const change = summarizeChangePlan(brief.changePlan)
+        await input.onStage('planning', `Carrying over ${change.kept.length} items, changing ${change.modified.length}, adding ${change.added.length}, removing ${change.removed.length}.`, input.detailLevel === 'detailed'
+          ? { kind: 'crew_change_plan', ...change, narrativeChanges: brief.changePlan.narrativeChanges }
           : undefined)
       }),
     ],
@@ -215,8 +255,8 @@ export async function runCrewPipeline(
   // 2. Analysis and layout in parallel. Only the analyst holds a query tool, so the parallel
   //    phase can never put two DuckDB workers in flight.
   await input.onStage('designing', 'Analysing the warehouse and designing the layout in parallel.')
-  const analysisSlot: { value?: AnalysisSubmission; error?: string } = {}
-  const layoutSlot: { value?: LayoutSubmission; error?: string } = {}
+  const analysisSlot: SubmissionSlot<AnalysisSubmission> = {}
+  const layoutSlot: SubmissionSlot<LayoutSubmission> = {}
   const analysisQueries = { count: 0 }
 
   const [analysisOutcome, layoutOutcome] = await Promise.allSettled([
@@ -224,7 +264,7 @@ export async function runCrewPipeline(
       role: 'analysis',
       modelId: roleModel('analysis'),
       systemPrompt: analysisSystemPrompt,
-      prompt: buildAnalysisPrompt({ prompt: input.prompt, brief }),
+      prompt: buildAnalysisPrompt({ prompt: input.prompt, brief, revision }),
       tools: [
         sourceContextTool(input, 'analysis'),
         queryTool(input, 'analysis', config.CREW_ANALYSIS_QUERY_BUDGET, analysisQueries),
@@ -232,7 +272,9 @@ export async function runCrewPipeline(
           await input.onStage('composing', `Analysis accepted for ${analysis.datasets.length} datasets.`, input.detailLevel === 'detailed'
             ? { kind: 'crew_analysis', headline: analysis.headline, amendments: analysis.amendments, cannotEstablish: analysis.cannotEstablish }
             : undefined)
-        }),
+        }, revision
+          ? { normalize: (payload) => carryOverAnalysis(payload, revision, brief.changePlan) }
+          : {}),
       ],
       completionGuard: () => analysisSlot.value
         ? undefined
@@ -244,13 +286,21 @@ export async function runCrewPipeline(
       role: 'layout',
       modelId: roleModel('layout'),
       systemPrompt: layoutSystemPrompt,
-      prompt: buildLayoutPrompt({ prompt: input.prompt, brief }),
+      prompt: buildLayoutPrompt({ prompt: input.prompt, brief, revision }),
       tools: [
         sourceContextTool(input, 'layout'),
         submitTool('submit_layout', 'Submit the widget specifications and document outline. This is the only way to finish the design.', layoutSubmissionSchema, layoutSlot, async (layout) => {
           await input.onStage('designing', `Layout accepted for ${layout.widgets.length} widgets.`, input.detailLevel === 'detailed'
             ? { kind: 'crew_layout', widgetCount: layout.widgets.length, outlineBlocks: layout.outline.length, designNotes: layout.designNotes }
             : undefined)
+        }, {
+          // Carry-over runs after the near-miss shape translation, so a restored widget is
+          // matched by id against an outline that already uses the contract's field names.
+          normalize: (payload) => {
+            const shaped = normalizeLayoutSubmission(payload)
+            return revision ? carryOverLayout(shaped, revision, brief.changePlan) : shaped
+          },
+          salvage: salvageLayoutSubmission,
         }),
       ],
       completionGuard: () => layoutSlot.value
@@ -269,14 +319,20 @@ export async function runCrewPipeline(
     const detail = analysisSlot.error ?? (analysisOutcome.status === 'rejected' ? String(analysisOutcome.reason) : 'no submission')
     throw new Error(`The analyst produced no usable analysis: ${detail}`)
   }
+  // A design rejected only for the shape of its outline still carries usable chart specs, so
+  // the salvaged part is preferred over dropping every widget to a default option.
+  const layout = layoutSlot.value ?? layoutSlot.salvaged
   if (!layoutSlot.value) {
-    await input.onStage('designing', 'The designer did not deliver; falling back to default chart options.', input.detailLevel === 'detailed'
-      ? { kind: 'crew_layout_fallback', error: layoutSlot.error ?? (layoutOutcome.status === 'rejected' ? String(layoutOutcome.reason) : 'no submission') }
+    const error = layoutSlot.error ?? (layoutOutcome.status === 'rejected' ? String(layoutOutcome.reason) : 'no submission')
+    await input.onStage('designing', layout
+      ? `The designer's submission was rejected; keeping the ${layout.widgets.length} chart specifications that validated and rebuilding the outline.`
+      : 'The designer did not deliver; falling back to default chart options.', input.detailLevel === 'detailed'
+      ? { kind: 'crew_layout_fallback', error, salvagedWidgets: layout?.widgets.length ?? 0, salvagedOutlineBlocks: layout?.outline.length ?? 0 }
       : undefined)
   }
 
   // 3. Deterministic draft, so a failed reviewer still yields a publishable dashboard.
-  const draft = assembleArtifact(brief, analysis, layoutSlot.value)
+  const draft = assembleArtifact(brief, analysis, layout)
   let draftIssues: string | undefined
   let fallback: DashboardArtifactV1 | undefined
   try {
@@ -288,7 +344,7 @@ export async function runCrewPipeline(
   // 4. Reviewer polishes and owns the only submission.
   await input.onStage('reviewing', 'A senior analyst-engineer is reviewing and polishing the dashboard.')
   const reviewQueries = { count: 0 }
-  const submissionSlot: { value?: DashboardArtifactV1; error?: string } = {}
+  const submissionSlot: SubmissionSlot<DashboardArtifactV1> = {}
   const reviewerTools: RoleTool[] = [sourceContextTool(input, 'reviewer')]
   if (config.CREW_REVIEW_QUERY_BUDGET > 0) {
     reviewerTools.push(queryTool(input, 'reviewer', config.CREW_REVIEW_QUERY_BUDGET, reviewQueries))
@@ -299,7 +355,7 @@ export async function runCrewPipeline(
     inputSchema: dashboardArtifactSchema,
     execute: async (payload: never) => {
       try {
-        const accepted = validateDashboardArtifact(payload)
+        const accepted = validateDashboardArtifact(revision ? carryOverArtifactSql(payload, revision, brief.changePlan) : payload)
         // The analyst tests its own SQL, but the reviewer assembles the final artifact and can
         // submit a statement nobody ran. validateDashboardArtifact does not screen SQL, so
         // without this the guard would only fire at canonicalisation, past the point where the
@@ -341,9 +397,10 @@ export async function runCrewPipeline(
           prompt: input.prompt,
           brief,
           analysis,
-          layout: layoutSlot.value,
+          layout,
           draft,
           draftIssues: submissionSlot.error ?? draftIssues,
+          revision,
         }),
         tools: reviewerTools,
         completionGuard: () => submissionSlot.value

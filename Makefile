@@ -7,7 +7,7 @@ CONTENT_NAME := $(notdir $(CONTENT_ABS))
 ENV_API_PORT := $(shell sed -n 's/^API_PORT=//p' .env 2>/dev/null | tail -1)
 API_HEALTH_URL ?= http://127.0.0.1:$(or $(API_PORT),$(ENV_API_PORT),3000)/api/health
 
-.PHONY: install build-contracts warehouse-idle skills-install dev up down purge setup migrate data-init data-backfill-summaries data-load-fashion-catalog data-load-tlc-yellow content-bootstrap wait-api test typecheck build
+.PHONY: install build-contracts warehouse-idle skills-install dev up down purge setup migrate data-init data-backfill-summaries data-load-fashion-catalog data-load-tlc-yellow content-init content-bootstrap reset-index wait-api test typecheck build
 
 install:
 	npm install
@@ -21,12 +21,12 @@ skills-install:
 	FIELDBOARD_CONTENT_PATH="$(abspath $(FIELDBOARD_CONTENT_PATH))" node "$(FIELDBOARD_SKILL_PATH)/scripts/fieldboard-author.mjs" doctor --allow-offline
 
 dev:
-	@git -C "$(FIELDBOARD_CONTENT_PATH)" rev-parse --git-dir >/dev/null 2>&1 || (echo "Fieldboard content repository is not initialized: $(FIELDBOARD_CONTENT_PATH)"; echo "Run: make setup"; exit 1)
+	@git -C "$(FIELDBOARD_CONTENT_PATH)" -c safe.directory="$(CONTENT_ABS)" rev-parse --git-dir >/dev/null 2>&1 || (echo "Fieldboard content repository is not initialized: $(FIELDBOARD_CONTENT_PATH)"; echo "Run: make setup"; exit 1)
 	mkdir -p data/warehouse
 	FIELDBOARD_CONTENT_PATH="$(abspath $(FIELDBOARD_CONTENT_PATH))" docker compose up --build
 
 up:
-	@git -C "$(FIELDBOARD_CONTENT_PATH)" rev-parse --git-dir >/dev/null 2>&1 || (echo "Run make setup first" && exit 1)
+	@git -C "$(FIELDBOARD_CONTENT_PATH)" -c safe.directory="$(CONTENT_ABS)" rev-parse --git-dir >/dev/null 2>&1 || (echo "Run make setup first" && exit 1)
 	mkdir -p data/warehouse
 	FIELDBOARD_CONTENT_PATH="$(abspath $(FIELDBOARD_CONTENT_PATH))" docker compose up -d --build
 
@@ -48,7 +48,7 @@ setup:
 	$(MAKE) build-contracts
 	mkdir -p data/raw data/warehouse "$(FIELDBOARD_CONTENT_PATH)"
 	$(MAKE) skills-install
-	$(MAKE) content-bootstrap
+	$(MAKE) content-init
 	$(MAKE) data-load-fashion-catalog
 	$(MAKE) data-load-tlc-yellow
 	FIELDBOARD_CONTENT_PATH="$(abspath $(FIELDBOARD_CONTENT_PATH))" docker compose up -d --build
@@ -79,10 +79,19 @@ data-load-fashion-catalog: warehouse-idle
 data-load-tlc-yellow: warehouse-idle
 	set -a; . ./.env; set +a; unset TLC_SOURCE_DATABASE_URL; WAREHOUSE_DIR="$(abspath data/warehouse)" npm run data:load-tlc-yellow -w @fieldboard/api
 
-content-bootstrap:
-	@mkdir -p "$(FIELDBOARD_CONTENT_PATH)" data/warehouse
-	FIELDBOARD_CONTENT_PATH="$(abspath $(FIELDBOARD_CONTENT_PATH))" docker compose up -d postgres minio minio-init
-	FIELDBOARD_CONTENT_PATH="$(abspath $(FIELDBOARD_CONTENT_PATH))" docker compose run --build --rm api npm run content:bootstrap -w @fieldboard/api
+content-init:
+	@mkdir -p "$(FIELDBOARD_CONTENT_PATH)"
+	CONTENT_REPOSITORY_PATH="$(abspath $(FIELDBOARD_CONTENT_PATH))" \
+	CONTENT_GIT_BRANCH="$(or $(CONTENT_GIT_BRANCH),main)" \
+	npm run content:init -w @fieldboard/api
+
+content-bootstrap: content-init
+
+reset-index:
+	@echo "Wiping Postgres and MinIO volumes; keeping $(FIELDBOARD_CONTENT_PATH) and data/warehouse"
+	docker compose stop
+	-docker volume rm "$(notdir $(CURDIR))_postgres_data" "$(notdir $(CURDIR))_minio_data"
+	FIELDBOARD_CONTENT_PATH="$(abspath $(FIELDBOARD_CONTENT_PATH))" docker compose up -d --build
 
 test:
 	npm test

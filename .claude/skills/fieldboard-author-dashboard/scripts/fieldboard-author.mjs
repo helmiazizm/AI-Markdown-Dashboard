@@ -277,7 +277,7 @@ async function validateImport(options) {
   if (!DASHBOARD_PATH.test(dashboard)) throw new Error('The dashboard path is not a valid stable Fieldboard content path')
   assertNote(note)
   const repository = await request('/api/repository')
-  if (!repository.head || !repository.fingerprint || !['dirty', 'unindexed'].includes(repository.readiness)) {
+  if (!repository.head || !repository.fingerprint || repository.readiness !== 'dirty') {
     throw new Error(repository.error || 'The repository does not contain importable changes')
   }
   if (repository.affectedDashboards.length !== 1 || repository.affectedDashboards[0] !== dashboard) {

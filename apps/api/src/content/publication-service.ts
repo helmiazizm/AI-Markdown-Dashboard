@@ -11,12 +11,12 @@ import {
 } from './codec.js'
 import {
   commitDashboardPath,
+  commitExists,
   findRevisionCommit,
   getCommitTreeSha,
   getRepositoryRoot,
   inspectGitRepository,
   isAncestor,
-  listChangedFilesBetween,
   listCommitsAfter,
 } from './git-repository.js'
 import {
@@ -71,28 +71,21 @@ export async function getRepositoryStatus(): Promise<RepositoryStatus> {
   let error = git.error
   let repair = git.repair
   let unindexedCommits: Array<{ sha: string; subject: string }> = []
-  let changedFiles = git.changedFiles
-  let affectedDashboards = git.affectedDashboards
-  if (git.initialized && git.head && database.indexedHead && git.head !== database.indexedHead) {
-    if (await isAncestor(database.indexedHead, git.head)) {
+  const changedFiles = git.changedFiles
+  const affectedDashboards = git.affectedDashboards
+  if (git.initialized && git.head && git.readiness !== 'wrong_branch' && git.readiness !== 'detached' && git.readiness !== 'unavailable') {
+    if (!database.indexedHead || database.indexedHead !== git.head) {
+      const indexedInRepo = database.indexedHead ? await commitExists(database.indexedHead) : false
+      const ancestor = Boolean(database.indexedHead && indexedInRepo && await isAncestor(database.indexedHead, git.head))
       readiness = git.clean ? 'unindexed' : git.readiness
-      unindexedCommits = await listCommitsAfter(database.indexedHead)
-      const committedChanges = await listChangedFilesBetween(database.indexedHead)
-      const seen = new Set(changedFiles.map((file) => `${file.status}:${file.path}`))
-      changedFiles = [...changedFiles, ...committedChanges.filter((file) => !seen.has(`${file.status}:${file.path}`))]
-      affectedDashboards = [...new Set(changedFiles.map((file) => file.dashboardPath).filter((value): value is string => Boolean(value)))]
-      error ??= 'The repository contains commits that have not been imported into PostgreSQL.'
-      repair ??= 'Validate and import the unindexed commits from the repository sync center.'
-    } else {
-      readiness = 'diverged'
-      error = 'The indexed Git history is no longer an ancestor of HEAD.'
-      repair = 'Repair the branch manually without rewriting the indexed history, then validate again.'
+      if (ancestor && database.indexedHead) unindexedCommits = await listCommitsAfter(database.indexedHead)
+      if (git.clean) {
+        error = indexedInRepo
+          ? 'The content indexer has not caught up to HEAD yet.'
+          : 'PostgreSQL has no projection for this Git repository yet; it will be rebuilt automatically.'
+        repair = 'Wait for the content-indexer sidecar to project Git into PostgreSQL. Do not import committed history from the sync center.'
+      }
     }
-  }
-  if (git.initialized && !database.activated) {
-    readiness = 'uninitialized'
-    error = 'The repository exists but Git-canonical storage has not been activated.'
-    repair = 'Run make content-bootstrap to replay and verify existing dashboard history.'
   }
   await setRepositoryState({ head: git.head, readiness, error }).catch(() => undefined)
   return {

@@ -17,11 +17,13 @@ import { createClineRoleRunner } from './crew/cline-role-runner.js'
 import { runCrewPipeline, type CrewPipelineOptions } from './crew/orchestrator.js'
 import { createDemoArtifact } from './demo.js'
 import { buildRunPrompt, dashboardAgentSystemPrompt } from './prompts.js'
+import type { RevisionContext } from './revision-context.js'
 
 export interface AgentRunInput {
   prompt: string
   detailLevel: GenerationDetailLevel
-  currentArtifact?: DashboardArtifactV1
+  /** Present only on a refinement: the base revision plus up to two before it. */
+  revisionContext?: RevisionContext
   revisionNumber?: number
   onStage: (type: GenerationEventType, message: string, payload?: Record<string, unknown>) => Promise<void>
 }
@@ -242,7 +244,7 @@ class ClineAgentAdapter implements DashboardAgentAdapter {
     const runTimeout = setTimeout(() => {
       agent.abort(`Generation deadline exceeded (${Math.round(config.AGENT_RUN_TIMEOUT_MS / 1000)} seconds)`)
     }, config.AGENT_RUN_TIMEOUT_MS)
-    const run = await agent.run(buildRunPrompt(input)).finally(() => clearTimeout(runTimeout))
+    const run = await agent.run(buildRunPrompt({ prompt: input.prompt, revision: input.revisionContext })).finally(() => clearTimeout(runTimeout))
     if (run.status !== 'completed') throw run.error ?? new Error(`Cline run ${run.status}`)
     if (!submitted) {
       throw new Error(submissionError

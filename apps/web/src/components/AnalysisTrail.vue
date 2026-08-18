@@ -77,6 +77,7 @@ const detailKinds = new Set([
   'run_config', 'source_context', 'query_plan', 'query_result', 'query_error',
   'artifact_summary', 'artifact_error', 'final_validation', 'dataset_validation', 'dataset_result',
   'crew_plan', 'crew_analysis', 'crew_layout', 'crew_layout_fallback', 'crew_review_fallback',
+  'revision_context', 'crew_change_plan',
 ])
 
 function kind(event: GenerationEvent): string {
@@ -184,6 +185,26 @@ function briefDatasets(event: GenerationEvent): { id: string; expectedColumns: s
               <span>{{ formatCount(numberValue(event, 'widgetCount')) }} widgets</span>
               <span v-for="renderer in textList(event, 'renderers')" :key="renderer">{{ renderer }}</span>
             </div>
+          </template>
+
+          <template v-else-if="kind(event) === 'revision_context'">
+            <div class="trail-tags">
+              <span>revision {{ formatCount(numberValue(event, 'baseRevisionNumber')) }} is the base</span>
+              <span>{{ formatCount(numberValue(event, 'datasetCount')) }} datasets</span>
+              <span>{{ formatCount(numberValue(event, 'widgetCount')) }} widgets</span>
+            </div>
+            <p v-if="textValue(event, 'priorPrompts')" class="trail-prompt-trail">{{ textValue(event, 'priorPrompts') }}</p>
+          </template>
+
+          <template v-else-if="kind(event) === 'crew_change_plan'">
+            <div class="trail-tags">
+              <span v-if="textList(event, 'kept').length">keeping {{ textList(event, 'kept').join(', ') }}</span>
+              <span v-if="textList(event, 'modified').length">changing {{ textList(event, 'modified').join(', ') }}</span>
+              <span v-if="textList(event, 'added').length">adding {{ textList(event, 'added').join(', ') }}</span>
+              <span v-if="textList(event, 'removed').length">removing {{ textList(event, 'removed').join(', ') }}</span>
+            </div>
+            <p v-if="textValue(event, 'narrativeChanges')" class="trail-note">{{ textValue(event, 'narrativeChanges') }}</p>
+            <p v-else class="trail-note">Anything kept is carried over from the published revision unchanged.</p>
           </template>
 
           <template v-else-if="kind(event) === 'crew_plan'">

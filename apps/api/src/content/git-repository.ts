@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import type { RepositoryFileChange, RepositoryReadiness } from '@fieldboard/contracts'
 import { getConfig } from '../config.js'
+import { isDashboardContentPath, loadBundleFromFiles, type LoadedBundle } from './codec.js'
 
 const execFileAsync = promisify(execFile)
 const MAX_GIT_OUTPUT = 2_000_000
@@ -26,7 +27,7 @@ function repositoryRoot(): string {
   return path.resolve(getConfig().CONTENT_REPOSITORY_PATH)
 }
 
-async function runGit(args: string[], options?: { allowFailure?: boolean; env?: NodeJS.ProcessEnv }): Promise<string> {
+async function runGit(args: string[], options?: { allowFailure?: boolean; env?: NodeJS.ProcessEnv; trim?: boolean }): Promise<string> {
   try {
     const { stdout } = await execFileAsync('git', ['-c', `safe.directory=${repositoryRoot()}`, ...args], {
       cwd: repositoryRoot(),
@@ -34,7 +35,7 @@ async function runGit(args: string[], options?: { allowFailure?: boolean; env?: 
       maxBuffer: MAX_GIT_OUTPUT,
       env: { ...process.env, ...options?.env },
     })
-    return stdout.trimEnd()
+    return options?.trim === false ? stdout : stdout.trimEnd()
   } catch (error) {
     if (options?.allowFailure) return ''
     const detail = error as Error & { stderr?: string }
@@ -88,7 +89,7 @@ export async function inspectGitRepository(): Promise<GitRepositorySnapshot> {
     return {
       initialized: false, branch: null, head: null, clean: false, readiness: 'uninitialized', fingerprint: null,
       changedFiles: [], affectedDashboards: [], error: 'The content repository directory does not exist.',
-      repair: 'Run make setup for a first-time checkout, or make content-bootstrap to initialize the canonical content repository.',
+      repair: 'Run make setup for a first-time checkout, or make content-init to initialize an empty content repository.',
     }
   }
   const gitDir = await runGit(['rev-parse', '--git-dir'], { allowFailure: true })
@@ -96,7 +97,7 @@ export async function inspectGitRepository(): Promise<GitRepositorySnapshot> {
     return {
       initialized: false, branch: null, head: null, clean: false, readiness: 'uninitialized', fingerprint: null,
       changedFiles: [], affectedDashboards: [], error: 'The configured directory is not a Git repository.',
-      repair: 'Run make setup if this is a first-time checkout, or make content-bootstrap if this is the intended empty content directory.',
+      repair: 'Run make setup if this is a first-time checkout, or make content-init if this is the intended empty content directory.',
     }
   }
   try {
@@ -129,21 +130,40 @@ export async function inspectGitRepository(): Promise<GitRepositorySnapshot> {
   }
 }
 
+async function writeSeedFileIfMissing(relativePath: string, value: string): Promise<boolean> {
+  try {
+    await writeFile(path.join(repositoryRoot(), relativePath), value, { encoding: 'utf8', flag: 'wx' })
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
+    throw error
+  }
+}
+
 export async function initializeGitRepository(): Promise<string> {
   const config = getConfig()
   await mkdir(repositoryRoot(), { recursive: true })
   const existing = await inspectGitRepository()
-  if (!existing.initialized) await execFileAsync('git', ['init', '-b', config.CONTENT_GIT_BRANCH, repositoryRoot()], { encoding: 'utf8', maxBuffer: MAX_GIT_OUTPUT })
+  if (existing.initialized && existing.head) return existing.head
+  if (!existing.initialized) {
+    const entries = await readdir(repositoryRoot()).catch(() => [])
+    if (entries.length > 0) throw new Error('Content init requires an absent or empty directory, or an already-initialized Git repository')
+    await execFileAsync('git', ['init', '-b', config.CONTENT_GIT_BRANCH, repositoryRoot()], { encoding: 'utf8', maxBuffer: MAX_GIT_OUTPUT })
+  }
   const rootFiles: Record<string, string> = {
     'fieldboard.repository.json': `${JSON.stringify({ schemaVersion: 1, branch: config.CONTENT_GIT_BRANCH, contentRoot: 'dashboards' }, null, 2)}\n`,
     'README.md': '# Fieldboard content\n\nGit-canonical analytical documents published by Fieldboard. Edit dashboard bundles, then validate and import them in the repository sync center.\n',
     '.gitattributes': '* text=auto eol=lf\n*.md text eol=lf\n*.sql text eol=lf\n*.json text eol=lf\n*.js text eol=lf\n',
     '.gitignore': '.fieldboard-tmp/\n.DS_Store\n',
   }
-  for (const [file, value] of Object.entries(rootFiles)) await writeFile(path.join(repositoryRoot(), file), value, { encoding: 'utf8', flag: 'w' })
+  const created: string[] = []
+  for (const [file, value] of Object.entries(rootFiles)) {
+    if (await writeSeedFileIfMissing(file, value)) created.push(file)
+  }
   const head = await runGit(['rev-parse', 'HEAD'], { allowFailure: true })
   if (!head) {
-    await runGit(['add', '--', ...Object.keys(rootFiles)])
+    const toCommit = created.length ? created : Object.keys(rootFiles)
+    await runGit(['add', '--', ...toCommit])
     await runGit(['commit', '-m', 'fieldboard: initialize content repository'], { env: authorEnvironment() })
   }
   return await runGit(['rev-parse', 'HEAD'])
@@ -243,6 +263,72 @@ export async function isAncestor(ancestor: string, descendant = 'HEAD'): Promise
   } catch {
     return false
   }
+}
+
+export async function commitExists(sha: string): Promise<boolean> {
+  if (!/^[0-9a-f]{40,64}$/i.test(sha)) return false
+  try {
+    await runGit(['cat-file', '-e', `${sha}^{commit}`])
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The caller prunes every projected dashboard absent from this list, so an unreadable tree must
+ * never look like an empty one. Listing the commit root first makes "this commit has no
+ * dashboards/ directory yet" a positive observation: the root listing succeeded and simply does
+ * not carry the entry. Both calls throw on failure, so a transient Git error propagates instead
+ * of being silently reported as a repository with no dashboards.
+ */
+export async function listDashboardPathsAt(commitSha: string): Promise<string[]> {
+  const root = await runGit(['ls-tree', '--name-only', commitSha])
+  if (!root.split('\n').includes('dashboards')) return []
+  const output = await runGit(['ls-tree', '--name-only', `${commitSha}:dashboards`])
+  if (!output) return []
+  return output.split('\n').map((name) => `dashboards/${name}`).filter((contentPath) => isDashboardContentPath(contentPath)).sort()
+}
+
+export async function listPathHistory(contentPath: string, options?: { afterCommit?: string | null; untilCommit?: string }): Promise<string[]> {
+  if (!isDashboardContentPath(contentPath)) throw new Error(`Invalid dashboard content path: ${contentPath}`)
+  const until = options?.untilCommit ?? 'HEAD'
+  const range = options?.afterCommit ? [`${options.afterCommit}..${until}`] : [until]
+  // Deliberately not allowFailure: an empty result has to mean "no commits touched this path",
+  // because a full reindex deletes every revision this walk does not return.
+  const output = await runGit(['log', '--reverse', '--format=%H', ...range, '--', contentPath])
+  return output ? output.split('\n').filter(Boolean) : []
+}
+
+function parseLsTree(output: string): Array<{ mode: string; type: string; path: string }> {
+  if (!output) return []
+  const entries: Array<{ mode: string; type: string; path: string }> = []
+  for (const entry of output.split('\0').filter(Boolean)) {
+    const tab = entry.indexOf('\t')
+    if (tab < 0) continue
+    const [mode, type] = entry.slice(0, tab).split(' ')
+    const filePath = entry.slice(tab + 1)
+    if (mode && type && filePath) entries.push({ mode, type, path: filePath })
+  }
+  return entries
+}
+
+export async function readBundleFilesAtCommit(commitSha: string, contentPath: string): Promise<Map<string, string>> {
+  if (!isDashboardContentPath(contentPath)) throw new Error(`Invalid dashboard content path: ${contentPath}`)
+  const tree = await runGit(['ls-tree', '-r', '-z', `${commitSha}:${contentPath}`], { allowFailure: true, trim: false })
+  const entries = parseLsTree(tree)
+  if (!entries.length) throw new Error(`Dashboard bundle is missing at ${commitSha}:${contentPath}`)
+  const files = new Map<string, string>()
+  for (const entry of entries) {
+    if (entry.mode === '120000' || entry.type !== 'blob') throw new Error(`Symlinks are not allowed in bundles: ${entry.path}`)
+    const body = await runGit(['show', `${commitSha}:${contentPath}/${entry.path}`], { trim: false })
+    files.set(entry.path, body)
+  }
+  return files
+}
+
+export async function loadBundleAtCommit(commitSha: string, contentPath: string): Promise<LoadedBundle> {
+  return loadBundleFromFiles(contentPath, await readBundleFilesAtCommit(commitSha, contentPath))
 }
 
 export async function boundedDiff(filePath: string, base?: string | null): Promise<string> {

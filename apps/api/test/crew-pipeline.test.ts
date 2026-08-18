@@ -3,7 +3,9 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { resetConfigForTests } from '../src/config.js'
 import { assembleArtifact, defaultChartOption } from '../src/agent/crew/fallbacks.js'
 import { runCrewPipeline, type RoleRunRequest, type RunRole } from '../src/agent/crew/orchestrator.js'
+import { layoutSubmissionSchema, normalizeLayoutSubmission, salvageLayoutSubmission } from '../src/agent/crew/contracts.js'
 import type { AgentRunInput } from '../src/agent/runner.js'
+import { digestArtifact, type RevisionContext } from '../src/agent/revision-context.js'
 
 const brief = {
   title: 'Yellow taxi Q1 performance',
@@ -59,12 +61,42 @@ const layout = {
   designNotes: 'One chart is enough for three data points.',
 }
 
-function makeInput(stages: GenerationEventType[]): AgentRunInput {
+function makeInput(stages: GenerationEventType[], revisionContext?: RevisionContext): AgentRunInput {
   return {
     prompt: 'Summarize Q1 performance of the yellow taxi in NYC',
     detailLevel: 'detailed',
+    revisionContext,
     onStage: async (type) => { stages.push(type) },
   }
+}
+
+const publishedSql = "SELECT data_month, COUNT(*) AS trips, ROUND(SUM(total_amount)/1000000, 2) AS revenue_musd FROM tlc.taxi.yellow_trips GROUP BY data_month ORDER BY data_month"
+
+/** A published revision 2 whose single dataset and widget are the ones a follow-up should keep. */
+function makeRevisionContext(): RevisionContext {
+  const baseArtifact = validateDashboardArtifact(assembleArtifact(brief, {
+    ...analysis,
+    datasets: [{ ...analysis.datasets[0]!, sql: publishedSql }],
+  }, layout))
+  return {
+    baseRevisionId: 'ddf25439-1111-4111-8111-111111111111',
+    baseRevisionNumber: 2,
+    baseNote: 'Add the airport premium to the narrative',
+    baseSourceKind: 'agent',
+    baseArtifact,
+    history: [digestArtifact({
+      revisionNumber: 1,
+      note: 'Summarize the performance of NYC taxi in Q1',
+      sourceKind: 'agent',
+      artifact: baseArtifact,
+    })],
+  }
+}
+
+const keepEverything = {
+  datasets: [{ id: 'monthly-volume', disposition: 'keep' as const, reason: 'still answers the question' }],
+  widgets: [{ id: 'monthly-volume-chart', disposition: 'keep' as const, reason: 'unchanged' }],
+  narrativeChanges: 'Only the closing caveat changes.',
 }
 
 /** Drives each role by invoking its submit tool with a canned payload. */
@@ -159,10 +191,77 @@ describe('crew generation pipeline', () => {
     expect(result.artifact.datasets[0]!.sql).not.toContain('DROP TABLE')
   })
 
+  it('accepts an outline written with the synonyms models reach for', async () => {
+    const looselyShaped = {
+      ...layout,
+      outline: [
+        { type: 'h2', title: 'Volume grew' },
+        { kind: 'paragraph', content: 'March was the strongest month.' },
+        { type: 'chart', id: 'monthly-volume-chart' },
+      ],
+    }
+    const stages: GenerationEventType[] = []
+    const result = await runCrewPipeline(makeInput(stages), {
+      runRole: scriptedRunner({ planner: brief, analysis, layout: looselyShaped }),
+    })
+    expect(result.artifact.markdown).toContain('## Volume grew')
+    expect(result.artifact.markdown).toContain('March was the strongest month.')
+    expect(result.artifact.markdown).toContain('{"widgetId":"monthly-volume-chart"}')
+    // The design was accepted, so nothing fell back to a default option.
+    expect(result.artifact.widgets[0]!.option).toEqual(layout.widgets[0]!.option)
+  })
+
+  it('keeps the designer chart specs when only the outline is unusable', async () => {
+    const brokenOutline = { ...layout, outline: [{ kind: 'widget' }, { kind: 'prose' }] }
+    const stages: GenerationEventType[] = []
+    const result = await runCrewPipeline(makeInput(stages), {
+      runRole: scriptedRunner({ planner: brief, analysis, layout: brokenOutline }),
+    })
+    expect(result.artifact.widgets[0]!.option).toEqual(layout.widgets[0]!.option)
+    // The outline was dropped, so the planner's narrative skeleton shapes the document instead.
+    expect(result.artifact.markdown).toContain('## Volume grew')
+    expect(result.artifact.markdown.match(/```dashboard/g)).toHaveLength(1)
+  })
+
   it('rejects a malformed plan and reports it', async () => {
     await expect(runCrewPipeline(makeInput([]), {
       runRole: scriptedRunner({ planner: { title: 'no' } }),
     })).rejects.toThrow(/planner produced no usable brief/)
+  })
+})
+
+describe('layout submission tolerance', () => {
+  it('translates block shapes that carry the same meaning under different keys', () => {
+    const parsed = layoutSubmissionSchema.parse(normalizeLayoutSubmission({
+      widgets: layout.widgets,
+      outline: [
+        '## Volume grew',
+        'A bare string is prose.',
+        { kind: 'lede', text: 'Q1 delivered 11.08 million trips.' },
+        { kind: 'heading', level: '3', label: 'Detail' },
+        { kind: 'figure', widget_id: 'monthly-volume-chart', width: 'Half' },
+      ],
+    }))
+    expect(parsed.outline).toEqual([
+      { kind: 'heading', level: 2, text: 'Volume grew' },
+      { kind: 'prose', claim: 'A bare string is prose.' },
+      { kind: 'lede', claim: 'Q1 delivered 11.08 million trips.' },
+      { kind: 'heading', level: 3, text: 'Detail' },
+      { kind: 'widget', widgetId: 'monthly-volume-chart', span: 'half' },
+    ])
+  })
+
+  it('leaves a block whose meaning is genuinely missing to fail validation', () => {
+    const normalized = normalizeLayoutSubmission({ widgets: layout.widgets, outline: [{ kind: 'widget' }, { kind: 'heading', level: 2, text: 'Fine' }] })
+    expect(layoutSubmissionSchema.safeParse(normalized).success).toBe(false)
+  })
+
+  it('salvages the widgets of a submission the outline made invalid', () => {
+    const salvaged = salvageLayoutSubmission({ widgets: layout.widgets, outline: [{ kind: 'widget' }], designNotes: 'kept' })
+    expect(salvaged?.widgets).toHaveLength(1)
+    expect(salvaged?.outline).toEqual([])
+    expect(salvaged?.designNotes).toBe('kept')
+    expect(salvageLayoutSubmission({ widgets: [{ id: 'x' }], outline: [] })).toBeUndefined()
   })
 })
 
@@ -196,5 +295,166 @@ describe('crew artifact assembly', () => {
     const paired = { ...layout, widgets: [{ ...layout.widgets[0]!, span: 'half' as const }] }
     expect(assembleArtifact(brief, analysis, paired).markdown).toContain('{"widgetId":"monthly-volume-chart","span":"half"}')
     expect(assembleArtifact(brief, analysis, layout).markdown).toContain('{"widgetId":"monthly-volume-chart"}')
+  })
+})
+
+describe('crew revisions continue the published dashboard', () => {
+  beforeEach(() => {
+    resetConfigForTests()
+    process.env.CREW_REVIEW_QUERY_BUDGET = '0'
+  })
+
+  it('gives every role the published state and the prompt trail, not just the planner', async () => {
+    const revision = makeRevisionContext()
+    const prompts = new Map<string, string>()
+    const revisedBrief = { ...brief, changePlan: keepEverything }
+    await runCrewPipeline(makeInput([], revision), {
+      runRole: async (request) => {
+        prompts.set(request.role, request.prompt)
+        const submit = request.tools.find((tool) => tool.name.startsWith('submit_'))!
+        const payload = {
+          planner: revisedBrief,
+          analysis,
+          layout,
+          reviewer: assembleArtifact(revisedBrief, analysis, layout),
+        }[request.role]
+        await submit.execute(payload as never)
+        return {}
+      },
+    })
+    for (const role of ['planner', 'analysis', 'layout', 'reviewer']) {
+      const prompt = prompts.get(role) ?? ''
+      expect(prompt, `${role} prompt names the published dataset`).toContain('monthly-volume')
+      expect(prompt, `${role} prompt carries the prompt trail`).toContain('Revision 1 was requested with')
+      expect(prompt, `${role} prompt states which revision it is producing`).toContain('revision 3')
+    }
+    // Each role is given only the slice it can act on.
+    expect(prompts.get('analysis')).toContain(publishedSql)
+    expect(prompts.get('analysis')).not.toContain('xAxis')
+    expect(prompts.get('layout')).not.toContain(publishedSql)
+  })
+
+  it('publishes the SQL that already ran even when the analyst rewrites a kept dataset', async () => {
+    const revision = makeRevisionContext()
+    const revisedBrief = { ...brief, changePlan: keepEverything }
+    const rewritten = {
+      ...analysis,
+      datasets: [{ ...analysis.datasets[0]!, sql: 'SELECT data_month, COUNT(*) AS journeys FROM tlc.taxi.yellow_trips GROUP BY 1', expectedColumns: ['data_month', 'journeys'] }],
+    }
+    const result = await runCrewPipeline(makeInput([], revision), {
+      runRole: scriptedRunner({ planner: revisedBrief, analysis: rewritten, layout }),
+    })
+    expect(result.artifact.datasets[0]!.sql).toBe(publishedSql)
+    expect(result.artifact.datasets[0]!.expectedColumns).toEqual(['data_month', 'trips', 'revenue_musd'])
+    expect(result.artifact.widgets[0]!.id).toBe('monthly-volume-chart')
+  })
+
+  it('restores a kept widget the designer redrew, so an untouched chart stays untouched', async () => {
+    const revision = makeRevisionContext()
+    const revisedBrief = { ...brief, changePlan: keepEverything }
+    const redrawn = {
+      ...layout,
+      widgets: [{ ...layout.widgets[0]!, title: 'Redrawn without being asked', height: 300, option: { series: [{ type: 'line' }] } }],
+    }
+    const result = await runCrewPipeline(makeInput([], revision), {
+      runRole: scriptedRunner({ planner: revisedBrief, analysis, layout: redrawn }),
+    })
+    expect(result.artifact.widgets[0]!.option).toEqual(revision.baseArtifact.widgets[0]!.option)
+    expect(result.artifact.widgets[0]!.title).toBe(revision.baseArtifact.widgets[0]!.title)
+  })
+
+  it('reports the revision context and the change plan in the run trail', async () => {
+    const revision = makeRevisionContext()
+    const revisedBrief = { ...brief, changePlan: keepEverything }
+    const payloads: Array<Record<string, unknown>> = []
+    await runCrewPipeline({
+      prompt: 'Soften the closing caveat',
+      detailLevel: 'detailed',
+      revisionContext: revision,
+      onStage: async (_type, _message, payload) => { if (payload) payloads.push(payload) },
+    }, {
+      runRole: scriptedRunner({ planner: revisedBrief, analysis, layout, reviewer: assembleArtifact(revisedBrief, analysis, layout) }),
+    })
+    const kinds = payloads.map((payload) => payload.kind)
+    expect(kinds).toContain('revision_context')
+    expect(kinds).toContain('crew_change_plan')
+    const change = payloads.find((payload) => payload.kind === 'crew_change_plan')!
+    expect(change.kept).toEqual(['monthly-volume', 'monthly-volume-chart'])
+  })
+
+  it('asks the analyst only for datasets that change, and says the rest are carried over', async () => {
+    const revision = makeRevisionContext()
+    const revisedBrief = {
+      ...brief,
+      datasets: [
+        ...brief.datasets,
+        { id: 'weekday-volume', question: 'How do weekdays compare with weekends?', expectedColumns: ['day_type', 'trips'], relationHints: [], analyticalNotes: '' },
+      ],
+      widgets: [
+        ...brief.widgets,
+        { id: 'weekday-chart', datasetId: 'weekday-volume', chartForm: 'bar' as const, intent: 'Weekday versus weekend volume', span: 'full' as const },
+      ],
+      changePlan: {
+        datasets: [
+          { id: 'monthly-volume', disposition: 'keep' as const, reason: 'unchanged' },
+          { id: 'weekday-volume', disposition: 'add' as const, reason: 'the follow-up asks for it' },
+        ],
+        widgets: [
+          { id: 'monthly-volume-chart', disposition: 'keep' as const, reason: 'unchanged' },
+          { id: 'weekday-chart', disposition: 'add' as const, reason: 'new' },
+        ],
+        narrativeChanges: '',
+      },
+    }
+    let analysisPrompt = ''
+    const result = await runCrewPipeline(makeInput([], revision), {
+      runRole: async (request) => {
+        if (request.role === 'analysis') analysisPrompt = request.prompt
+        const submit = request.tools.find((tool) => tool.name.startsWith('submit_'))!
+        if (request.role === 'planner') await submit.execute(revisedBrief as never)
+        if (request.role === 'analysis') {
+          // Only the added dataset, as instructed.
+          await submit.execute({
+            ...analysis,
+            datasets: [{
+              id: 'weekday-volume', question: 'How do weekdays compare with weekends?',
+              sql: 'SELECT day_type, COUNT(*) AS trips FROM tlc.taxi.yellow_trips GROUP BY day_type',
+              expectedColumns: ['day_type', 'trips'], maxRows: 2,
+              finding: 'Weekdays carry 71 percent of the trips in the quarter.', caveats: [],
+            }],
+          } as never)
+        }
+        if (request.role === 'layout') await submit.execute(layout as never)
+        return {}
+      },
+    })
+    // Carry-over reinstates the kept dataset the analyst never mentioned, so the published chart
+    // keeps its source and the artifact still validates.
+    expect(result.artifact.datasets.map((dataset) => dataset.id).sort()).toEqual(['monthly-volume', 'weekday-volume'])
+    expect(result.artifact.datasets.find((dataset) => dataset.id === 'monthly-volume')!.sql).toBe(publishedSql)
+    expect(analysisPrompt).toContain('carried over for you automatically')
+    // The kept dataset is named as carried over, not handed back as work to redo.
+    const requested = analysisPrompt.slice(analysisPrompt.indexOf('Produce the SQL and findings'))
+    expect(requested).toContain('weekday-volume')
+    expect(requested).not.toContain('monthly-volume')
+  })
+
+  it('leaves the create path exactly as it was, with no revision language in any prompt', async () => {
+    const prompts: string[] = []
+    await runCrewPipeline(makeInput([]), {
+      runRole: async (request) => {
+        prompts.push(request.prompt)
+        const submit = request.tools.find((tool) => tool.name.startsWith('submit_'))!
+        const payload = { planner: brief, analysis, layout, reviewer: assembleArtifact(brief, analysis, layout) }[request.role]
+        await submit.execute(payload as never)
+        return {}
+      },
+    })
+    expect(prompts).toHaveLength(4)
+    for (const prompt of prompts) {
+      expect(prompt).not.toContain('revision')
+      expect(prompt).not.toContain('change plan')
+    }
+    expect(prompts[0]).toContain('Plan a new dashboard from the governed warehouse catalog')
   })
 })

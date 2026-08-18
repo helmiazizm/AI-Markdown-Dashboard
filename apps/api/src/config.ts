@@ -36,6 +36,7 @@ const envSchema = z.object({
   CONTENT_GIT_BRANCH: z.string().regex(/^[A-Za-z0-9._\/-]+$/).default('main'),
   CONTENT_GIT_AUTHOR_NAME: z.string().min(1).max(120).default('Fieldboard'),
   CONTENT_GIT_AUTHOR_EMAIL: z.string().regex(/^[^\s@]+@[^\s@]+$/).default('fieldboard@local'),
+  CONTENT_INDEX_INTERVAL_MS: z.coerce.number().int().min(250).max(600_000).default(3000),
   API_PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
 })
 

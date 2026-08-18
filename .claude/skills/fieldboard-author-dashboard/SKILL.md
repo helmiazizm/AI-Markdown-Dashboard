@@ -11,7 +11,7 @@ Turn one analyst request into one evidence-backed dashboard bundle. Keep the ana
 
 1. Treat the directory containing this `SKILL.md` as the skill root. Claude Code exposes it as `${CLAUDE_SKILL_DIR}`.
 2. Run `node "${CLAUDE_SKILL_DIR}/scripts/fieldboard-author.mjs" doctor` before editing anything. Its `limits` block reports the field bounds validation enforces; keep every authored field inside them rather than trusting a length copied from prose.
-3. Stop without modifying files when the doctor reports a dirty, unavailable, divergent, or unindexed repository.
+3. Stop without modifying files when the doctor reports a dirty, unavailable, or detached repository. If the repository is unindexed, wait for the content indexer to catch up rather than editing or importing.
 4. Read [references/bundle-contract.md](references/bundle-contract.md) and [references/source-semantics.md](references/source-semantics.md). Read [references/chart-authoring.md](references/chart-authoring.md) before changing a widget.
 5. Work on exactly one dashboard directory per invocation. Never reset, clean, stash, switch branches, commit, push, pull, fetch, or repair Git.
 

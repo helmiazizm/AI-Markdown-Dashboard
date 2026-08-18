@@ -63,6 +63,20 @@ describe('dashboard artifact contract', () => {
     expect(() => validateDashboardArtifact(unsafe)).toThrow(/host dataset|external/)
   })
 
+  it('accepts a legend that names its series, but not rows smuggled through a legend', () => {
+    const legible = structuredClone(base)
+    legible.widgets[0]!.option = { legend: { data: ['records', { name: 'segment', icon: 'circle' }] }, series: [{ type: 'bar', encode: { x: 'records', y: 'segment' } }] }
+    expect(() => validateDashboardArtifact(legible)).not.toThrow()
+
+    const smuggled = structuredClone(base)
+    smuggled.widgets[0]!.option = { legend: { data: [[1, 2], [3, 4]] } }
+    expect(() => validateDashboardArtifact(smuggled)).toThrow(/host dataset/)
+
+    const elsewhere = structuredClone(base)
+    elsewhere.widgets[0]!.option = { xAxis: { type: 'category', data: ['Jan', 'Feb'] } }
+    expect(() => validateDashboardArtifact(elsewhere)).toThrow(/host dataset/)
+  })
+
   it('rejects dangerous D3 capabilities', () => {
     for (const script of ['fetch("https://example.com")', 'localStorage.getItem("x")', 'parent.location = "https://example.com"']) {
       const unsafe = structuredClone(base) as any

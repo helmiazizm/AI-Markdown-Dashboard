@@ -18,7 +18,7 @@ let stopFollowing: (() => void) | undefined
 const canValidate = computed(() => Boolean(
   repository.value?.fingerprint
   && repository.value.head
-  && ['dirty', 'unindexed'].includes(repository.value.readiness)
+  && repository.value.readiness === 'dirty'
   && !working.value,
 ))
 const canImport = computed(() => validation.value?.status === 'valid' && changeNote.value.trim().length >= 5 && !working.value)
@@ -165,7 +165,7 @@ function eventTime(value: string): string {
           >
             <span>{{ file.status }}</span><code>{{ file.path }}</code><small>{{ file.dashboardPath ? 'BUNDLE' : 'ROOT' }}</small>
           </button>
-          <p v-if="!repository.changedFiles.length" class="repository-empty">No working-tree or unindexed content changes. The projection is aligned with HEAD.</p>
+          <p v-if="!repository.changedFiles.length" class="repository-empty">No working-tree changes. Committed history is projected by the content indexer.</p>
 
           <div v-if="repository.unindexedCommits.length" class="commit-ledger">
             <span class="eyebrow">Unindexed commits</span>

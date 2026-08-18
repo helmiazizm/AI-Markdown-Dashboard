@@ -13,6 +13,8 @@
     "data:load-tlc-yellow": "tsx src/data/load-tlc-yellow.ts",
     "data:load-fashion-catalog": "tsx src/data/load-fashion-catalog.ts",
     "data:ensure-warehouse": "tsx src/data/ensure-warehouse.ts",
+    "content:init": "tsx src/content/bootstrap.ts",
+    "content:index": "tsx src/content/indexer.ts",
     "content:bootstrap": "tsx src/content/bootstrap.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"

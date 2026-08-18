@@ -5,6 +5,7 @@ import type { Pool } from 'pg'
 export async function runMigrationDirectory(targetPool: Pool, migrationDir: string, label: string): Promise<void> {
   const client = await targetPool.connect()
   try {
+    await client.query('SELECT pg_advisory_lock(910011001)')
     await client.query(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         name text PRIMARY KEY,
@@ -28,6 +29,7 @@ export async function runMigrationDirectory(targetPool: Pool, migrationDir: stri
       }
     }
   } finally {
+    await client.query('SELECT pg_advisory_unlock(910011001)').catch(() => undefined)
     client.release()
   }
 }
