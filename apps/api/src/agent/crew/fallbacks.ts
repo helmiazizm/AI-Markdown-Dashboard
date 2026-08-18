@@ -69,7 +69,7 @@ export function defaultChartOption(form: ChartForm, columns: string[]): Record<s
   }
 }
 
-function fenceFor(widgetId: string, span: WidgetSpan): string {
+export function fenceFor(widgetId: string, span: WidgetSpan): string {
   const payload = span === 'half' ? { widgetId, span } : { widgetId }
   return ['```dashboard', JSON.stringify(payload), '```'].join('\n')
 }

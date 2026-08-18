@@ -114,6 +114,37 @@ function trailLine(revisionNumber: number, sourceKind: RevisionSourceKind, note:
 }
 
 /**
+ * Whether any revision in scope was produced by the crew, and therefore whether a prompt trail
+ * carries requests at all. A dashboard authored through the Claude Code skill and imported from
+ * Git has only a 5-240 character change note per revision: honest provenance, but no analytical
+ * intent. Its intent lives in the document, which renderDocumentIntent reads.
+ */
+export function hasAgentHistory(context: RevisionContext): boolean {
+  return context.baseSourceKind === 'agent' || context.history.some((item) => item.sourceKind === 'agent')
+}
+
+/**
+ * Intent as the document itself states it, for a base whose prompts may carry none.
+ *
+ * Deliberately excludes markdown. The planner and reviewer already receive the whole base
+ * artifact; putting 32 KB of prose in the analyst's and designer's prompts as well would undo the
+ * tapering that keeps a four-role revision affordable. Dataset questions are the strongest signal
+ * here -- they are natural-language analytical questions by construction, and bounded at 240
+ * characters each.
+ */
+export function renderDocumentIntent(context: RevisionContext): string {
+  const lines = [
+    `Title: ${context.baseArtifact.title}`,
+    `Summary: ${context.baseArtifact.summary}`,
+    'Questions this dashboard already answers:',
+    ...context.baseArtifact.datasets.map((dataset) => `- ${dataset.id}: ${dataset.question}`),
+    'Charts it already carries:',
+    ...context.baseArtifact.widgets.map((widget) => `- ${widget.id} (${widget.engine}): ${widget.title} — ${widget.description}`),
+  ]
+  return [`What this dashboard already argues, read from the document itself:`, ...lines].join('\n')
+}
+
+/**
  * Renders how the dashboard reached its current state, oldest first, so a role reads the
  * trajectory rather than only the latest sentence.
  */
@@ -145,10 +176,19 @@ export function analystView(context: RevisionContext): Array<{
   }))
 }
 
-/** What the designer needs: the existing chart specs and the columns they encode against. */
+/**
+ * What the designer needs: the existing chart specs and the columns they encode against.
+ *
+ * A widget the crew cannot express -- anything other than ECharts -- is marked preserved and
+ * carries no option, because there is none to copy. Saying so explicitly matters: told only to
+ * "return the option object exactly as given", a designer handed a widget with no option either
+ * invents one or drops the widget, and both outcomes destroy an authored chart.
+ */
 export function designerView(context: RevisionContext): Array<{
   id: string
   datasetId: string
+  engine: string
+  preserved: boolean
   title: string
   description: string
   accessibilityText: string
@@ -160,6 +200,8 @@ export function designerView(context: RevisionContext): Array<{
   return context.baseArtifact.widgets.map((widget) => ({
     id: widget.id,
     datasetId: widget.datasetId,
+    engine: widget.engine,
+    preserved: widget.engine !== 'echarts',
     title: widget.title,
     description: widget.description,
     accessibilityText: widget.accessibilityText,

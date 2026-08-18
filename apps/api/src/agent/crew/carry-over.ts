@@ -1,5 +1,7 @@
+import type { DashboardArtifactV1 } from '@fieldboard/contracts'
 import type { RevisionContext } from '../revision-context.js'
 import { dispositions, type ChangePlan } from './contracts.js'
+import { fenceFor } from './fallbacks.js'
 
 /**
  * Deterministic continuity for a refinement.
@@ -152,29 +154,96 @@ export function carryOverLayout(payload: unknown, context: RevisionContext, plan
 }
 
 /**
- * Last line of defence at the reviewer's submission. The reviewer is told not to touch SQL that
- * has already run, and this makes it structural for kept datasets: SQL that never executed
- * against the warehouse fails the whole publication, well after the crew has finished.
+ * Base widgets the crew has no way to express, and therefore no way to redesign.
+ *
+ * layoutWidgetSchema carries no engine and requires an ECharts option object, and assembleArtifact
+ * stamps every widget it emits as echarts. That is deliberate -- a role cannot be trusted to author
+ * a sandboxed D3 script -- but it means a D3 widget routed through the crew comes back as a generic
+ * bar chart with its script gone from Git. So these widgets bypass the layout submission entirely
+ * and are spliced back after assembly.
+ *
+ * A modify disposition collapses to keep: the crew cannot honour "change this chart" for a renderer
+ * it cannot write, and quietly replacing it would be worse than leaving it alone. Only an explicit
+ * remove retires one.
  */
-export function carryOverArtifactSql(payload: unknown, context: RevisionContext, plan?: ChangePlan): unknown {
+export function preservedWidgets(context: RevisionContext, plan?: ChangePlan): DashboardArtifactV1['widgets'] {
+  // changePlan is optional, so a planner can omit it. Everywhere else that means "treat the base
+  // as new work", but here it would mean deleting an authored script nobody asked to delete, so
+  // an absent plan preserves everything instead.
+  const planned = dispositions(plan?.widgets ?? [])
+  const retiredDatasets = new Set(
+    (plan?.datasets ?? []).filter((entry) => entry.disposition === 'remove').map((entry) => entry.id),
+  )
+  return context.baseArtifact.widgets.filter((widget) => (
+    widget.engine !== 'echarts'
+    && planned.get(widget.id) !== 'remove'
+    // A widget whose dataset is retired goes with it: a widget with no dataset cannot validate.
+    && !retiredDatasets.has(widget.datasetId)
+  ))
+}
+
+/**
+ * Last line of defence at the reviewer's submission, and where preserved widgets rejoin the
+ * document. The reviewer is told not to touch SQL that has already run and to return a preserved
+ * widget verbatim; this makes both structural. SQL that never executed against the warehouse fails
+ * the whole publication well after the crew has finished, and a lost D3 script is unrecoverable.
+ */
+export function carryOverArtifact(payload: unknown, context: RevisionContext, plan?: ChangePlan): unknown {
   const artifact = plainRecord(payload)
-  if (!artifact || !plan || !Array.isArray(artifact.datasets)) return payload
-  const planned = dispositions(plan.datasets)
+  if (!artifact) return payload
+  const planned = dispositions(plan?.datasets ?? [])
   const baseById = new Map(context.baseArtifact.datasets.map((dataset) => [dataset.id, dataset]))
-  return {
-    ...artifact,
-    datasets: artifact.datasets.map((entry) => {
+
+  const datasets = Array.isArray(artifact.datasets)
+    ? artifact.datasets.map((entry) => {
       const dataset = plainRecord(entry)
       const id = dataset ? identifier(dataset.id) : undefined
       if (!dataset || !id || planned.get(id) !== 'keep') return entry
       const base = baseById.get(id)
       if (!base) return entry
       return { ...dataset, sql: base.sql, expectedColumns: base.expectedColumns, maxRows: base.maxRows }
-    }),
+    })
+    : artifact.datasets
+
+  const preserved = preservedWidgets(context, plan)
+  if (preserved.length === 0) return { ...artifact, datasets }
+
+  const preservedById = new Map(preserved.map((widget) => [widget.id, widget]))
+  const submitted = Array.isArray(artifact.widgets) ? artifact.widgets : []
+  const seen = new Set<string>()
+  const widgets: unknown[] = []
+  for (const entry of submitted) {
+    const id = identifier(plainRecord(entry)?.id)
+    // A preserved widget the crew rebuilt as ECharts is swapped back for the published object.
+    const base = id ? preservedById.get(id) : undefined
+    if (id && base) seen.add(id)
+    widgets.push(base ?? entry)
   }
+  const appended = preserved.filter((widget) => !seen.has(widget.id))
+  widgets.push(...appended)
+
+  // A dashboard fence carries only its widgetId, so a swapped widget keeps its place in the
+  // narrative untouched. Only a widget the crew dropped altogether needs a new fence, and it is
+  // placed the same way assembleArtifact places one the outline forgot.
+  let markdown = typeof artifact.markdown === 'string' ? artifact.markdown : ''
+  const unplaced = appended.filter((widget) => !markdown.includes(`"widgetId":"${widget.id}"`))
+  if (unplaced.length > 0) {
+    markdown = [
+      markdown.trimEnd(),
+      '## Supporting evidence',
+      ...unplaced.flatMap((widget) => [fenceFor(widget.id, 'full'), widget.description]),
+    ].join('\n\n')
+  }
+  return { ...artifact, datasets, widgets, markdown }
 }
 
-/** Counts for the run trail, so the analyst can see what the crew reused rather than rebuilt. */
+/**
+ * What the crew reused rather than rebuilt, for the run trail.
+ *
+ * Ids are deduplicated across datasets and widgets: a planner often names a widget after the
+ * dataset it plots, and listing "kids-season-coverage" twice reads as a mistake rather than as
+ * one dataset and one chart.
+ */
 export function summarizeChangePlan(plan: ChangePlan): {
   kept: string[]
   modified: string[]
@@ -182,6 +251,8 @@ export function summarizeChangePlan(plan: ChangePlan): {
   removed: string[]
 } {
   const all = [...plan.datasets, ...plan.widgets]
-  const of = (disposition: string): string[] => all.filter((entry) => entry.disposition === disposition).map((entry) => entry.id)
+  const of = (disposition: string): string[] => [...new Set(
+    all.filter((entry) => entry.disposition === disposition).map((entry) => entry.id),
+  )]
   return { kept: of('keep'), modified: of('modify'), added: of('add'), removed: of('remove') }
 }

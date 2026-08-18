@@ -23,7 +23,7 @@ import {
   type DashboardBrief,
   type LayoutSubmission,
 } from './contracts.js'
-import { carryOverAnalysis, carryOverArtifactSql, carryOverLayout, summarizeChangePlan } from './carry-over.js'
+import { carryOverAnalysis, carryOverArtifact, carryOverLayout, preservedWidgets, summarizeChangePlan } from './carry-over.js'
 import { assembleArtifact } from './fallbacks.js'
 import {
   analysisSystemPrompt,
@@ -215,7 +215,7 @@ export async function runCrewPipeline(
       ? {
           kind: 'revision_context',
           baseRevisionNumber: revision.baseRevisionNumber,
-          priorPrompts: renderPromptTrail(revision),
+          priorRevisions: renderPromptTrail(revision),
           datasetCount: revision.baseArtifact.datasets.length,
           widgetCount: revision.baseArtifact.widgets.length,
         }
@@ -331,8 +331,27 @@ export async function runCrewPipeline(
       : undefined)
   }
 
-  // 3. Deterministic draft, so a failed reviewer still yields a publishable dashboard.
-  const draft = assembleArtifact(brief, analysis, layout)
+  // 3. Deterministic draft, so a failed reviewer still yields a publishable dashboard. Preserved
+  //    widgets are spliced in here too: the fallback has to be as faithful as the reviewed path,
+  //    or a reviewer failure would be the one route that still loses an authored D3 chart.
+  const preserved = revision ? preservedWidgets(revision, brief.changePlan) : []
+  if (preserved.length > 0) {
+    await input.onStage('designing', preserved.length === 1
+      ? `Carrying over 1 custom-rendered widget the crew cannot redraw: ${preserved[0]!.id}.`
+      : `Carrying over ${preserved.length} custom-rendered widgets the crew cannot redraw.`, input.detailLevel === 'detailed'
+      ? {
+          kind: 'crew_preserved_widgets',
+          widgets: preserved.map((widget) => widget.id),
+          engines: [...new Set(preserved.map((widget) => widget.engine))],
+        }
+      : undefined)
+  }
+  // Carry-over only swaps datasets, widgets and the markdown of an already well-formed artifact,
+  // so the shape holds. Validation stays where it was, below, because an invalid draft is handed
+  // to the reviewer to fix rather than failing the run.
+  const draft = revision
+    ? carryOverArtifact(assembleArtifact(brief, analysis, layout), revision, brief.changePlan) as DashboardArtifactV1
+    : assembleArtifact(brief, analysis, layout)
   let draftIssues: string | undefined
   let fallback: DashboardArtifactV1 | undefined
   try {
@@ -355,7 +374,7 @@ export async function runCrewPipeline(
     inputSchema: dashboardArtifactSchema,
     execute: async (payload: never) => {
       try {
-        const accepted = validateDashboardArtifact(revision ? carryOverArtifactSql(payload, revision, brief.changePlan) : payload)
+        const accepted = validateDashboardArtifact(revision ? carryOverArtifact(payload, revision, brief.changePlan) : payload)
         // The analyst tests its own SQL, but the reviewer assembles the final artifact and can
         // submit a statement nobody ran. validateDashboardArtifact does not screen SQL, so
         // without this the guard would only fire at canonicalisation, past the point where the

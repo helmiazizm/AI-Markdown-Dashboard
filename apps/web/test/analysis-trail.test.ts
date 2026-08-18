@@ -106,7 +106,7 @@ const revisionEvents = [
     payload: {
       kind: 'revision_context',
       baseRevisionNumber: 2,
-      priorPrompts: 'Revision 1 was requested with: Summarize Q1\nRevision 2 was a hand edit imported from Git, noted as: Fixed a typo',
+      priorRevisions: 'Revision 1 was requested with: Summarize Q1\nRevision 2 was a hand edit imported from Git, noted as: Fixed a typo',
       datasetCount: 4,
       widgetCount: 4,
     },
@@ -154,5 +154,22 @@ describe('revision trail', () => {
 
     expect(wrapper.find('.trail-detail').exists()).toBe(false)
     expect(wrapper.text()).toContain('Planning revision 3')
+  })
+})
+
+describe('preserved widget trail', () => {
+  const preservedEvent = {
+    id: 1,
+    type: 'designing' as const,
+    message: 'Carrying over 1 custom-rendered widget the crew cannot redraw: completion-dots.',
+    createdAt: 'now',
+    payload: { kind: 'crew_preserved_widgets', widgets: ['completion-dots'], engines: ['d3'] },
+  }
+
+  it('names the widget and explains why it was not redrawn', () => {
+    const wrapper = mount(AnalysisTrail, { props: { events: [preservedEvent], detailed: true } })
+
+    expect(wrapper.findAll('.trail-tags').map((node) => node.text()).join(' ')).toContain('completion-dots')
+    expect(wrapper.text()).toContain('d3 charts cannot be redrawn by the crew')
   })
 })

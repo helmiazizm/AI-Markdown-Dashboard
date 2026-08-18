@@ -1,4 +1,4 @@
-import { renderPromptTrail, type RevisionContext } from './revision-context.js'
+import { hasAgentHistory, renderDocumentIntent, renderPromptTrail, type RevisionContext } from './revision-context.js'
 
 export const dashboardAgentSystemPrompt = `You are Fieldboard's bounded data analyst.
 
@@ -31,7 +31,10 @@ export function buildRunPrompt(input: { prompt: string; revision?: RevisionConte
   if (!input.revision) return `Create a new dashboard from the governed warehouse catalog for this request:\n\n${input.prompt}`
   return [
     `You are producing revision ${input.revision.baseRevisionNumber + 1} of an existing dashboard. Return a complete artifact for the new revision, carrying forward everything the follow-up does not ask you to change.`,
-    `How this dashboard got here, oldest first:\n${renderPromptTrail(input.revision)}`,
+    renderDocumentIntent(input.revision),
+    hasAgentHistory(input.revision)
+      ? `How this dashboard got here, oldest first:\n${renderPromptTrail(input.revision)}`
+      : 'This dashboard was authored outside the agent, by hand or through the authoring skill, so there are no prior requests to read. Take its intent from the document above.',
     `The follow-up request to act on:\n${input.prompt}`,
     `The published artifact you are revising. Reuse its dataset and widget ids, and copy the SQL and chart options of anything you keep exactly as they appear here:\n${JSON.stringify(input.revision.baseArtifact)}`,
   ].join('\n\n')

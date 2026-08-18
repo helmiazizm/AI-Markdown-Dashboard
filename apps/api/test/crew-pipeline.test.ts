@@ -458,3 +458,127 @@ describe('crew revisions continue the published dashboard', () => {
     expect(prompts[0]).toContain('Plan a new dashboard from the governed warehouse catalog')
   })
 })
+
+const SKILL_D3_SCRIPT = "const root=d3.select(container);root.selectAll('*').remove();const svg=root.append('svg').attr('width',width).attr('height',height);svg.append('circle').attr('cx',width/2).attr('cy',height/2).attr('r',10).attr('fill',theme.signal);"
+
+/**
+ * A base as the fieldboard-author-dashboard skill would leave it: imported from Git, so its only
+ * recorded prompt is a change note, and carrying a D3 widget the crew cannot author.
+ */
+function makeSkillAuthoredContext(): RevisionContext {
+  const assembled = validateDashboardArtifact(assembleArtifact(brief, {
+    ...analysis,
+    datasets: [{ ...analysis.datasets[0]!, sql: publishedSql }],
+  }, layout))
+  const baseArtifact = validateDashboardArtifact({
+    ...assembled,
+    widgets: [
+      ...assembled.widgets,
+      {
+        id: 'completion-dots', datasetId: 'monthly-volume', engine: 'd3' as const,
+        title: 'Completion dots', description: 'A custom dot row the skill authored.',
+        accessibilityText: 'Dots show completion percent by month.',
+        height: 300, script: SKILL_D3_SCRIPT,
+      },
+    ],
+    markdown: `${assembled.markdown}\n\n\`\`\`dashboard\n{"widgetId":"completion-dots"}\n\`\`\`\n`,
+  })
+  return {
+    baseRevisionId: 'ccf25439-1111-4111-8111-111111111111',
+    baseRevisionNumber: 1,
+    baseNote: 'Answer the spring boys-and-girls clothing question within catalog limits',
+    baseSourceKind: 'manual',
+    baseArtifact,
+    history: [],
+  }
+}
+
+describe('crew revisions of a skill-authored dashboard', () => {
+  beforeEach(() => {
+    resetConfigForTests()
+    process.env.CREW_REVIEW_QUERY_BUDGET = '0'
+  })
+
+  const skillBrief = {
+    ...brief,
+    changePlan: {
+      datasets: [{ id: 'monthly-volume', disposition: 'keep' as const, reason: 'unchanged' }],
+      widgets: [
+        { id: 'monthly-volume-chart', disposition: 'keep' as const, reason: 'unchanged' },
+        { id: 'completion-dots', disposition: 'keep' as const, reason: 'custom renderer' },
+      ],
+      narrativeChanges: '',
+    },
+  }
+
+  it('takes intent from the document and never presents an import note as a request', async () => {
+    const revision = makeSkillAuthoredContext()
+    const prompts = new Map<string, string>()
+    await runCrewPipeline(makeInput([], revision), {
+      runRole: async (request) => {
+        prompts.set(request.role, request.prompt)
+        const submit = request.tools.find((tool) => tool.name.startsWith('submit_'))!
+        const payload = { planner: skillBrief, analysis, layout, reviewer: undefined }[request.role]
+        if (payload !== undefined) await submit.execute(payload as never)
+        return {}
+      },
+    })
+    for (const role of ['planner', 'analysis', 'layout', 'reviewer']) {
+      const prompt = prompts.get(role) ?? ''
+      expect(prompt, `${role} reads intent from the document`).toContain('What this dashboard already argues')
+      expect(prompt, `${role} sees the dataset question`).toContain('How did trips and fares move by month?')
+      expect(prompt, `${role} is told there are no prior requests`).toContain('authored outside the crew')
+      // The import note must never be dressed up as an analytical request.
+      expect(prompt, `${role} gets no fabricated request line`).not.toContain('was requested with')
+    }
+  })
+
+  it('publishes the D3 widget with its script intact, fenced exactly once', async () => {
+    const revision = makeSkillAuthoredContext()
+    const result = await runCrewPipeline(makeInput([], revision), {
+      runRole: scriptedRunner({ planner: skillBrief, analysis, layout }),
+    })
+    const dots = result.artifact.widgets.find((widget) => widget.id === 'completion-dots')
+    expect(dots?.engine).toBe('d3')
+    expect(dots && 'script' in dots ? dots.script : undefined).toBe(SKILL_D3_SCRIPT)
+    expect(result.artifact.markdown.match(/"widgetId":"completion-dots"/g)).toHaveLength(1)
+    // The ECharts widget beside it is still carried over normally.
+    expect(result.artifact.widgets.find((widget) => widget.id === 'monthly-volume-chart')!.option)
+      .toEqual(revision.baseArtifact.widgets[0]!.option)
+  })
+
+  it('reports the preserved widget rather than swapping it silently', async () => {
+    const revision = makeSkillAuthoredContext()
+    const payloads: Array<Record<string, unknown>> = []
+    await runCrewPipeline({
+      prompt: 'Soften the closing caveat',
+      detailLevel: 'detailed',
+      revisionContext: revision,
+      onStage: async (_type, _message, payload) => { if (payload) payloads.push(payload) },
+    }, {
+      runRole: scriptedRunner({ planner: skillBrief, analysis, layout }),
+    })
+    const preserved = payloads.find((payload) => payload.kind === 'crew_preserved_widgets')
+    expect(preserved).toBeDefined()
+    expect(preserved!.widgets).toEqual(['completion-dots'])
+    expect(preserved!.engines).toEqual(['d3'])
+  })
+
+  it('still renders the prompt trail when the dashboard does have agent history', async () => {
+    const agentRevision = makeRevisionContext()
+    let plannerPrompt = ''
+    await runCrewPipeline(makeInput([], agentRevision), {
+      runRole: async (request) => {
+        if (request.role === 'planner') plannerPrompt = request.prompt
+        const submit = request.tools.find((tool) => tool.name.startsWith('submit_'))!
+        const payload = { planner: { ...brief, changePlan: keepEverything }, analysis, layout, reviewer: undefined }[request.role]
+        if (payload !== undefined) await submit.execute(payload as never)
+        return {}
+      },
+    })
+    expect(plannerPrompt).toContain('Revision 1 was requested with')
+    expect(plannerPrompt).not.toContain('authored outside the crew')
+    // The derived brief is present either way.
+    expect(plannerPrompt).toContain('What this dashboard already argues')
+  })
+})

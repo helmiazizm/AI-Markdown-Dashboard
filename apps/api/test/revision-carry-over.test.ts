@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { DashboardArtifactV1 } from '@fieldboard/contracts'
-import { carryOverAnalysis, carryOverArtifactSql, carryOverLayout, summarizeChangePlan } from '../src/agent/crew/carry-over.js'
+import { carryOverAnalysis, carryOverArtifact, carryOverLayout, preservedWidgets, summarizeChangePlan } from '../src/agent/crew/carry-over.js'
 import { changePlanSchema, type ChangePlan } from '../src/agent/crew/contracts.js'
-import { analystView, designerView, digestArtifact, renderPromptTrail, type RevisionContext } from '../src/agent/revision-context.js'
+import { analystView, designerView, digestArtifact, hasAgentHistory, renderDocumentIntent, renderPromptTrail, type RevisionContext } from '../src/agent/revision-context.js'
 
 const KEPT_SQL = "SELECT data_month, COUNT(*) AS trips FROM tlc.taxi.yellow_trips GROUP BY data_month ORDER BY data_month"
 const KEPT_OPTION = {
@@ -175,7 +175,7 @@ describe('layout carry-over', () => {
   })
 })
 
-describe('reviewer SQL carry-over', () => {
+describe('reviewer artifact carry-over', () => {
   it('pins a kept dataset back to the statement that actually ran', () => {
     const artifact = {
       version: 1, title: 't', summary: 's', markdown: 'm',
@@ -185,7 +185,7 @@ describe('reviewer SQL carry-over', () => {
       ],
       widgets: [],
     }
-    const carried = carryOverArtifactSql(artifact, context, plan()) as typeof artifact
+    const carried = carryOverArtifact(artifact, context, plan()) as typeof artifact
     expect(carried.datasets[0]!.sql).toBe(KEPT_SQL)
     expect(carried.datasets[0]!.expectedColumns).toEqual(['data_month', 'trips'])
     // A newly added dataset keeps whatever the reviewer submitted and re-tested.
@@ -230,5 +230,162 @@ describe('change plan summary', () => {
       added: ['weekday-volume', 'weekday-chart'],
       removed: ['retired-view', 'retired-heatmap'],
     })
+  })
+
+  it('lists an id once when a widget is named after the dataset it plots', () => {
+    const shared = changePlanSchema.parse({
+      datasets: [{ id: 'kids-season-coverage', disposition: 'keep' }],
+      widgets: [{ id: 'kids-season-coverage', disposition: 'keep' }],
+    })
+    expect(summarizeChangePlan(shared).kept).toEqual(['kids-season-coverage'])
+  })
+})
+
+const D3_SCRIPT = "const root=d3.select(container);root.selectAll('*').remove();const svg=root.append('svg').attr('width',width).attr('height',height);svg.selectAll('circle').data(data).join('circle').attr('cx',(d,i)=>40+i*60).attr('cy',height/2).attr('r',9).attr('fill',theme.signal);"
+
+/** A skill-authored base whose second widget uses a renderer the crew cannot write. */
+const d3Context: RevisionContext = {
+  ...context,
+  baseSourceKind: 'manual',
+  baseNote: 'Answer the spring boys-and-girls clothing question within catalog limits',
+  history: [],
+  baseArtifact: {
+    ...baseArtifact,
+    widgets: [
+      baseArtifact.widgets[0]!,
+      {
+        id: 'completion-dots', datasetId: 'monthly-volume', engine: 'd3',
+        title: 'Completion dots', description: 'A custom dot row for monthly completion.',
+        accessibilityText: 'Dots show completion percent by month.',
+        height: 300, script: D3_SCRIPT,
+      },
+    ],
+  },
+}
+
+function d3Plan(disposition: 'keep' | 'modify' | 'remove'): ChangePlan {
+  return changePlanSchema.parse({
+    datasets: [{ id: 'monthly-volume', disposition: 'keep' }],
+    widgets: [
+      { id: 'monthly-volume-chart', disposition: 'keep' },
+      { id: 'completion-dots', disposition },
+    ],
+  })
+}
+
+function draftWithoutD3(): Record<string, unknown> {
+  return {
+    version: 1, title: 't', summary: 'summary text', markdown: '# t\n\n```dashboard\n{"widgetId":"monthly-volume-chart"}\n```\n',
+    datasets: [{ id: 'monthly-volume', question: 'q', sql: KEPT_SQL, expectedColumns: ['data_month', 'trips'], maxRows: 12 }],
+    widgets: [{
+      id: 'monthly-volume-chart', datasetId: 'monthly-volume', engine: 'echarts',
+      title: 'Trips by month', description: 'Monthly trip counts.',
+      accessibilityText: 'A bar chart of monthly trips.', height: 420, option: KEPT_OPTION,
+    }],
+  }
+}
+
+describe('widgets the crew cannot author', () => {
+  it('preserves a kept D3 widget, and treats modify as keep because it cannot be redrawn', () => {
+    for (const disposition of ['keep', 'modify'] as const) {
+      const preserved = preservedWidgets(d3Context, d3Plan(disposition))
+      expect(preserved.map((widget) => widget.id)).toEqual(['completion-dots'])
+      expect(preserved[0]).toEqual(d3Context.baseArtifact.widgets[1])
+    }
+  })
+
+  it('preserves one even when the planner omitted a change plan entirely', () => {
+    // An absent plan means "new work" everywhere else, but deleting an authored script nobody
+    // asked to delete is not a defensible default.
+    expect(preservedWidgets(d3Context, undefined).map((widget) => widget.id)).toEqual(['completion-dots'])
+    const carried = carryOverArtifact(draftWithoutD3(), d3Context, undefined) as { widgets: Array<Record<string, unknown>> }
+    expect(carried.widgets.map((widget) => widget.id)).toEqual(['monthly-volume-chart', 'completion-dots'])
+    expect(carried.widgets[1]!.script).toBe(D3_SCRIPT)
+  })
+
+  it('retires one only when the plan says remove', () => {
+    expect(preservedWidgets(d3Context, d3Plan('remove'))).toEqual([])
+  })
+
+  it('retires one whose dataset was removed, since a widget with no dataset cannot validate', () => {
+    const plan = changePlanSchema.parse({
+      datasets: [{ id: 'monthly-volume', disposition: 'remove' }],
+      widgets: [{ id: 'completion-dots', disposition: 'keep' }],
+    })
+    expect(preservedWidgets(d3Context, plan)).toEqual([])
+  })
+
+  it('swaps a D3 widget the crew rebuilt as ECharts back for the published object, in place', () => {
+    const draft = draftWithoutD3()
+    draft.widgets = [
+      ...(draft.widgets as unknown[]),
+      // What assembleArtifact produces today: the right id, the wrong everything else.
+      { id: 'completion-dots', datasetId: 'monthly-volume', engine: 'echarts', title: 'Completion dots', description: 'd', accessibilityText: 'a', height: 420, option: { series: [{ type: 'bar' }] } },
+    ]
+    draft.markdown = `${draft.markdown as string}\n\`\`\`dashboard\n{"widgetId":"completion-dots"}\n\`\`\`\n`
+    const carried = carryOverArtifact(draft, d3Context, d3Plan('keep')) as {
+      widgets: Array<Record<string, unknown>>
+      markdown: string
+    }
+    const restored = carried.widgets.find((widget) => widget.id === 'completion-dots')!
+    expect(restored.engine).toBe('d3')
+    expect(restored.script).toBe(D3_SCRIPT)
+    expect(restored.option).toBeUndefined()
+    // The fence was already there, so no second one is added.
+    expect(carried.markdown.match(/"widgetId":"completion-dots"/g)).toHaveLength(1)
+    expect(carried.markdown).not.toContain('Supporting evidence')
+  })
+
+  it('reinstates and fences a D3 widget the crew dropped entirely', () => {
+    const carried = carryOverArtifact(draftWithoutD3(), d3Context, d3Plan('keep')) as {
+      widgets: Array<Record<string, unknown>>
+      markdown: string
+    }
+    expect(carried.widgets.map((widget) => widget.id)).toEqual(['monthly-volume-chart', 'completion-dots'])
+    expect(carried.widgets[1]!.script).toBe(D3_SCRIPT)
+    expect(carried.markdown.match(/"widgetId":"completion-dots"/g)).toHaveLength(1)
+    expect(carried.markdown).toContain('Supporting evidence')
+  })
+
+  it('leaves a removed D3 widget out without fencing it', () => {
+    const carried = carryOverArtifact(draftWithoutD3(), d3Context, d3Plan('remove')) as {
+      widgets: Array<Record<string, unknown>>
+      markdown: string
+    }
+    expect(carried.widgets.map((widget) => widget.id)).toEqual(['monthly-volume-chart'])
+    expect(carried.markdown).not.toContain('completion-dots')
+  })
+
+  it('tells the designer a preserved widget has no option to copy', () => {
+    const view = designerView(d3Context)
+    const dots = view.find((widget) => widget.id === 'completion-dots')!
+    expect(dots.preserved).toBe(true)
+    expect(dots.engine).toBe('d3')
+    expect(dots.option).toBeUndefined()
+    // An ECharts widget is still handed over with its option, and is not flagged.
+    const bar = view.find((widget) => widget.id === 'monthly-volume-chart')!
+    expect(bar.preserved).toBe(false)
+    expect(bar.option).toEqual(KEPT_OPTION)
+    // The script never reaches the designer either way.
+    expect(JSON.stringify(view)).not.toContain('d3.select')
+  })
+})
+
+describe('intent read from the document', () => {
+  it('states the title, summary, dataset questions and chart titles', () => {
+    const intent = renderDocumentIntent(d3Context)
+    expect(intent).toContain('Yellow taxi Q1 performance')
+    expect(intent).toContain('How did trips move by month?')
+    expect(intent).toContain('completion-dots (d3): Completion dots')
+    // Markdown is deliberately excluded to keep the analyst and designer prompts small.
+    expect(intent).not.toContain('# Yellow taxi Q1 performance')
+    expect(intent).not.toContain('SELECT')
+  })
+
+  it('knows when there are no prior requests to read', () => {
+    expect(hasAgentHistory(d3Context)).toBe(false)
+    expect(hasAgentHistory(context)).toBe(true)
+    // A manual base with one agent revision behind it still has a usable trail.
+    expect(hasAgentHistory({ ...d3Context, history: context.history })).toBe(true)
   })
 })

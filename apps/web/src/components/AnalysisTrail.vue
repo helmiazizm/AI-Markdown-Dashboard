@@ -77,7 +77,7 @@ const detailKinds = new Set([
   'run_config', 'source_context', 'query_plan', 'query_result', 'query_error',
   'artifact_summary', 'artifact_error', 'final_validation', 'dataset_validation', 'dataset_result',
   'crew_plan', 'crew_analysis', 'crew_layout', 'crew_layout_fallback', 'crew_review_fallback',
-  'revision_context', 'crew_change_plan',
+  'revision_context', 'crew_change_plan', 'crew_preserved_widgets',
 ])
 
 function kind(event: GenerationEvent): string {
@@ -193,7 +193,7 @@ function briefDatasets(event: GenerationEvent): { id: string; expectedColumns: s
               <span>{{ formatCount(numberValue(event, 'datasetCount')) }} datasets</span>
               <span>{{ formatCount(numberValue(event, 'widgetCount')) }} widgets</span>
             </div>
-            <p v-if="textValue(event, 'priorPrompts')" class="trail-prompt-trail">{{ textValue(event, 'priorPrompts') }}</p>
+            <p v-if="textValue(event, 'priorRevisions')" class="trail-prompt-trail">{{ textValue(event, 'priorRevisions') }}</p>
           </template>
 
           <template v-else-if="kind(event) === 'crew_change_plan'">
@@ -205,6 +205,13 @@ function briefDatasets(event: GenerationEvent): { id: string; expectedColumns: s
             </div>
             <p v-if="textValue(event, 'narrativeChanges')" class="trail-note">{{ textValue(event, 'narrativeChanges') }}</p>
             <p v-else class="trail-note">Anything kept is carried over from the published revision unchanged.</p>
+          </template>
+
+          <template v-else-if="kind(event) === 'crew_preserved_widgets'">
+            <div class="trail-tags">
+              <span v-for="widget in textList(event, 'widgets')" :key="widget">{{ widget }}</span>
+            </div>
+            <p class="trail-note">Carried over untouched: {{ textList(event, 'engines').join(', ') }} charts cannot be redrawn by the crew, so their scripts are preserved exactly as authored.</p>
           </template>
 
           <template v-else-if="kind(event) === 'crew_plan'">
